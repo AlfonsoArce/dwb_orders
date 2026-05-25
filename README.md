@@ -21,7 +21,7 @@ Clone the repo, install the dependency, then copy the example env file and fill
 in your credentials:
 
 ```bash
-uv sync                 # or: pip install -r requirements.txt
+uv sync                 # installs dependencies from pyproject.toml / uv.lock
 
 cp .env.example .env
 # edit .env and set DWB_CID and DWB_KEY
