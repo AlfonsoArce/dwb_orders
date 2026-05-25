@@ -1,0 +1,14 @@
+[project]
+name = "dwb-orders"
+version = "0.1.0"
+description = "Fetch orders from the Digital Waybill API and save each as a JSON file."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Alfonso Arce" }]
+# Standard library only — no third-party runtime dependencies.
+dependencies = []
+
+[tool.uv]
+# This is an application, not a distributable package.
+package = false

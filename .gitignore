@@ -1,0 +1,29 @@
+# Secrets - never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Fetched order data - contains real customer PII, never commit
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
