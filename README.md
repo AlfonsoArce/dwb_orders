@@ -1,24 +1,28 @@
 # dwb_orders
 
-A small, dependency-free Python CLI that pulls orders from the
+A small Python CLI that pulls orders from the
 [Digital Waybill API](https://github.com/digwaybill/Digital-Waybill-API) and
 saves each order as its own JSON file.
 
 It pages through `GET /{CID}/orders.json`, handles the API's Windows-1252
-encoding, masks your API key in log output, and writes one
-`order_<number>.json` file per order.
+encoding, shows a progress bar, redacts your API key from all log output, and
+writes one `order_<number>.json` file per order. Orders in a terminal state
+(completed/cancelled) that are already saved are skipped on re-runs.
 
 ## Requirements
 
 - Python 3.9+
-- No third-party packages (standard library only)
+- [`tqdm`](https://github.com/tqdm/tqdm) (the only third-party dependency)
 - [uv](https://docs.astral.sh/uv/) is the recommended way to run it
 
 ## Setup
 
-Clone the repo, then copy the example env file and fill in your credentials:
+Clone the repo, install the dependency, then copy the example env file and fill
+in your credentials:
 
 ```bash
+uv sync                 # or: pip install -r requirements.txt
+
 cp .env.example .env
 # edit .env and set DWB_CID and DWB_KEY
 ```
@@ -58,6 +62,12 @@ uv run get_orders.py --raw
 
 # write order files somewhere else
 uv run get_orders.py --out-dir ./data
+
+# re-download terminal orders even if already saved
+uv run get_orders.py --no-skip-terminal
+
+# keep the console to the progress bar, capture full logs to a file
+uv run get_orders.py --console-level ERROR --log-level DEBUG --log-file logs/fetch.log
 ```
 
 Run `uv run get_orders.py --help` for the full list of flags.

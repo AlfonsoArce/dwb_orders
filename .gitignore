@@ -6,6 +6,10 @@
 # Fetched order data - contains real customer PII, never commit
 output/
 
+# Log files
+logs/
+*.log
+
 # Python
 __pycache__/
 *.py[cod]

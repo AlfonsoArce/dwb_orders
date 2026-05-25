@@ -6,8 +6,9 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Alfonso Arce" }]
-# Standard library only — no third-party runtime dependencies.
-dependencies = []
+dependencies = [
+    "tqdm>=4.67",
+]
 
 [tool.uv]
 # This is an application, not a distributable package.
