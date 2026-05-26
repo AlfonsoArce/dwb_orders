@@ -8,6 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Alfonso Arce" }]
 dependencies = [
     "tqdm>=4.67",
+    "xlsxwriter>=3.2.9",
 ]
 
 [tool.uv]

@@ -9,10 +9,21 @@ encoding, shows a progress bar, redacts your API key from all log output, and
 writes one `order_<number>.json` file per order. Orders in a terminal state
 (completed/cancelled) that are already saved are skipped on re-runs.
 
+## What's in the repo
+
+- [`get_orders.py`](get_orders.py) — fetch orders from the Digital Waybill API
+- [`process_route_stops.py`](process_route_stops.py) — flatten every `route_stop`
+  from downloaded orders into a single `.xlsx` (one row per stop)
+- [`route_stops_by_cost_center.py`](route_stops_by_cost_center.py) — group
+  unique stop locations under each `cost_center` into a two-sheet `.xlsx`
+  (summary + locations)
+
 ## Requirements
 
 - Python 3.9+
-- [`tqdm`](https://github.com/tqdm/tqdm) (the only third-party dependency)
+- Third-party packages (declared in [`pyproject.toml`](pyproject.toml)):
+  [`tqdm`](https://github.com/tqdm/tqdm),
+  [`xlsxwriter`](https://github.com/jmcnamara/XlsxWriter)
 - [uv](https://docs.astral.sh/uv/) is the recommended way to run it
 
 ## Setup
@@ -72,9 +83,26 @@ uv run get_orders.py --console-level ERROR --log-level DEBUG --log-file logs/fet
 
 Run `uv run get_orders.py --help` for the full list of flags.
 
+### Post-processing the downloaded orders
+
+After you've populated `output/` (or whichever `--out-dir` you used), the two
+helper scripts turn the JSON files into Excel workbooks:
+
+```bash
+# one row per route_stop, prefixed with order-level context
+uv run process_route_stops.py --input-dir output --output output/route_stops.xlsx
+
+# distinct stop locations grouped by cost_center (two sheets: summary + locations)
+uv run route_stops_by_cost_center.py --input-dir output --output output/route_stops_by_cost_center.xlsx
+```
+
+Use `--help` on either script for the full set of flags (sheet name, row limit,
+log level/file, etc.).
+
 ## Output
 
-By default each order is written to `./output/order_<number>.json`. The
+By default each order is written to `./output/order_<number>.json`, and the
+post-processing scripts write their `.xlsx` files under `output/` too. The
 `output/` directory is git-ignored because fetched orders contain real
 customer data (names, addresses, phone numbers, pricing).
 
