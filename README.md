@@ -17,13 +17,17 @@ writes one `order_<number>.json` file per order. Orders in a terminal state
 - [`route_stops_by_cost_center.py`](route_stops_by_cost_center.py) — group
   unique stop locations under each `cost_center` into a two-sheet `.xlsx`
   (summary + locations)
+- [`extract_invoice_orders.py`](extract_invoice_orders.py) — read HawkExpress
+  invoice PDFs under `input/invoices/<vendor>/*.pdf` and emit a three-sheet
+  `.xlsx` (invoices / orders / adjustments)
 
 ## Requirements
 
 - Python 3.9+
 - Third-party packages (declared in [`pyproject.toml`](pyproject.toml)):
   [`tqdm`](https://github.com/tqdm/tqdm),
-  [`xlsxwriter`](https://github.com/jmcnamara/XlsxWriter)
+  [`xlsxwriter`](https://github.com/jmcnamara/XlsxWriter),
+  [`pdfplumber`](https://github.com/jsvine/pdfplumber) (invoice PDF parsing)
 - [uv](https://docs.astral.sh/uv/) is the recommended way to run it
 
 ## Setup
@@ -98,6 +102,29 @@ uv run route_stops_by_cost_center.py --input-dir output --output output/route_st
 
 Use `--help` on either script for the full set of flags (sheet name, row limit,
 log level/file, etc.).
+
+### Extracting orders from HawkExpress invoice PDFs
+
+Drop the invoice PDFs under `input/invoices/<vendor>/*.pdf`, then:
+
+```bash
+uv run extract_invoice_orders.py
+# or with explicit paths:
+uv run extract_invoice_orders.py --input-dir input/invoices --output output/invoice_orders.xlsx
+```
+
+The script parses each invoice's line-item table by column position (the table
+layouts pdfplumber returns are inconsistent across vendors), pulls
+order-number / From / To / service / reference / amount per line, attaches
+per-order discount lines, and writes three sheets:
+
+- **invoices** — one row per invoice header (vendor, invoice #, dates, totals)
+- **orders** — one row per `#NNNNNN` order line, with `amount` + `discount_amount`
+- **adjustments** — invoice-level lines without an order # (global discounts,
+  waiting-time fees, after-hour fees, etc.)
+
+Each invoice's `total` equals `sum(orders.amount) + sum(orders.discount_amount)
++ sum(adjustments.amount)`.
 
 ## Output
 

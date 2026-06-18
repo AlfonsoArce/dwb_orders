@@ -6,6 +6,9 @@
 # Fetched order data - contains real customer PII, never commit
 output/
 
+# Source invoices (real HawkExpress PDFs) - PII, never commit
+input/
+
 # Log files
 logs/
 *.log
