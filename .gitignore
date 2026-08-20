@@ -3,11 +3,20 @@
 .env.*
 !.env.example
 
-# Fetched order data - contains real customer PII, never commit
-output/
-
-# Source invoices (real HawkExpress PDFs) - PII, never commit
-input/
+# Real data directories.
+#
+# input/  = source HawkExpress invoice PDFs (customer PII)
+# output/ = fetched orders, workbooks and backups (customer PII)
+#
+# The *files* never get committed, but the *folder layout* does, so a fresh
+# clone lands with the same tree the scripts expect. Each directory carries a
+# .gitkeep marker; everything else in these trees is ignored.
+input/**
+!input/**/
+!input/**/.gitkeep
+output/**
+!output/**/
+!output/**/.gitkeep
 
 # Log files
 logs/
@@ -18,6 +27,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv.nosync/
 venv/
 env/
 .Python
@@ -27,6 +37,9 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Claude Code - share the slash commands, keep per-machine settings local
+.claude/settings.local.json
 
 # OS / editor
 .DS_Store
