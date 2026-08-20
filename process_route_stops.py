@@ -17,77 +17,13 @@ import sys
 import xlsxwriter
 from tqdm import tqdm
 
-# The signature_lines SVG can be tens of KB per stop — useless in a spreadsheet
-# and would push xlsx file size into the GBs. Drop it.
-DROPPED_STOP_FIELDS = ("signature_lines",)
+from dwb.fields import DROPPED_STOP_FIELDS, ORDER_FIELDS, STOP_FIELDS
 
 # Excel cells max out at 32,767 chars; we truncate longer text with a marker so
 # the write does not abort mid-file on an outlier row.
 EXCEL_CELL_LIMIT = 32_767
 TRUNC_MARKER = "…[truncated]"
 
-ORDER_FIELDS = (
-    "id",
-    "order_number",
-    "time",
-    "status",
-    "status_date",
-    "status_detail",
-    "origin",
-    "order_type",
-    "price",
-    "final_price",
-    "customer_number",
-    "cost_center",
-    "dispatch_driver",
-    "ready_time",
-    "deliver_by",
-    "flagged",
-    "read",
-    "pending",
-    "comm_override",
-    "recurring_name",
-    "optimized_route",
-    "version",
-)
-
-STOP_FIELDS = (
-    "route_stop_id",
-    "company",
-    "address",
-    "suite",
-    "city",
-    "state",
-    "postal_code",
-    "country",
-    "service_type",
-    "package",
-    "number_of_pieces",
-    "weight",
-    "vehicle",
-    "driver_number",
-    "paper_waybill",
-    "special_instructions",
-    "return_add",
-    "dispatch_message",
-    "notes",
-    "signature_contact",
-    "reference",
-    "signature",
-    "fuel_surcharge",
-    "route_status",
-    "route_status_detail",
-    "route_status_date",
-    "distance",
-    "air_distance",
-    "driver_pricelist",
-    "receive_date",
-    "dispatch_date",
-    "pickup_date",
-    "delivery_date",
-    "cancel_date",
-    "confirm_date",
-)
 
 def _order_col(k):
     # Avoid awkward doubled prefixes like "order_order_number".
