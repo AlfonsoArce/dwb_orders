@@ -20,15 +20,24 @@ Example .env (see .env.example):
 Then just run:
     python3 get_orders.py
 
-Each run writes the per-order JSON files plus an Excel workbook of the fetched
-orders (output/orders.xlsx by default). Use --excel PATH to relocate it or
---no-excel to skip it.
+Every Order fetched is stored in Postgres — that is the source of truth. The
+connection string follows the same precedence as the credentials above
+(--dsn, then DWB_DSN, then .env), and the run stops immediately if the store
+cannot be reached.
 
-An order is only written when its order_number isn't already on disk; see
---overwrite and --refresh-stale to change that.
+Each run also writes the per-order JSON files, because the spreadsheet
+exporters still read them, plus an Excel workbook of the fetched orders
+(output/orders.xlsx by default). Use --excel PATH to relocate it, --no-excel
+to skip it, or --no-json to stop writing the per-order files once the
+exporters have been migrated.
+
+A JSON file is only written when its order_number isn't already on disk; see
+--overwrite and --refresh-stale to change that. The database has its own rule:
+an Order is rewritten only when the dispatch system's revision marker is newer.
 """
 
 import argparse
+import collections
 import json
 import logging
 import os
@@ -42,7 +51,13 @@ import urllib.request
 import xlsxwriter
 from tqdm import tqdm
 
-BASE_URL = "https://api.dwaybill.com"
+from dwb import db, ingest
+from dwb.config import load_dotenv
+from dwb.fields import DROPPED_STOP_FIELDS, ORDER_FIELDS, STOP_FIELDS
+
+# Overridable so the tests can point the fetcher at a local stub of the API
+# and still exercise the real HTTP path: encoding, envelope, paging, retries.
+BASE_URL = os.environ.get("DWB_BASE_URL", "https://api.dwaybill.com")
 API_VERSION = "1"
 # Terminal statuses: orders in these states are immutable, so once saved we
 # don't download them again. Both UK/US spellings of cancelled are covered.
@@ -112,28 +127,6 @@ def setup_logging(level="INFO", log_file=None, console_level=None):
         logger.info("Logging to file: %s", log_file)
 
     return logger
-
-
-def load_dotenv(path=".env"):
-    """Minimal .env loader (no external deps).
-
-    Reads KEY=VALUE lines and sets them in os.environ without overriding
-    variables that are already set in the real environment.
-    """
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            if line.lower().startswith("export "):
-                line = line[len("export "):]
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
 
 
 def decode_body(raw, resp_headers=None):
@@ -232,7 +225,8 @@ def fetch_page(cid, params, timeout, max_retries=5, backoff=2.0):
     return request_json(url, timeout, max_retries=max_retries, backoff=backoff)
 
 
-def fetch_order(cid, order_number, key, customer_number=None, password=None, timeout=30.0):
+def fetch_order(cid, order_number, key, customer_number=None, password=None,
+                timeout=30.0, max_retries=5, backoff=2.0):
     """Fetch one order's full detail via GET /{CID}/orders.json/{order_number}.
 
     Returns the single order dict (unwrapped from the {status, error, body}
@@ -241,7 +235,7 @@ def fetch_order(cid, order_number, key, customer_number=None, password=None, tim
     """
     query = urllib.parse.urlencode(_creds(key, customer_number, password))
     url = f"{BASE_URL}/{cid}/orders.json/{order_number}?{query}"
-    data, _ = request_json(url, timeout)
+    data, _ = request_json(url, timeout, max_retries=max_retries, backoff=backoff)
 
     if isinstance(data, dict) and data.get("error"):
         logger.error("API error (status %s): %s", data.get("status"), data["error"])
@@ -274,25 +268,6 @@ def order_id(order):
         return int(order.get("order_number"))
     except (TypeError, ValueError):
         return None
-
-
-def saved_order_numbers(out_dir):
-    """Return the set of order_numbers already saved in out_dir.
-
-    Derived from the order_<n>.json filenames (no files are opened), so one
-    directory scan answers "do we already have this order?" for the whole run —
-    much cheaper than an os.path.exists() per order, which matters when the
-    archive is large or sitting in a synced folder.
-    """
-    nums = set()
-    if not out_dir or not os.path.isdir(out_dir):
-        return nums
-    with os.scandir(out_dir) as it:
-        for e in it:
-            m = re.match(r"order_(\d+)\.json$", e.name)
-            if m:
-                nums.add(int(m.group(1)))
-    return nums
 
 
 def saved_is_terminal(path):
@@ -338,36 +313,78 @@ def save_order(order, out_dir):
     return path
 
 
+FetchResult = collections.namedtuple(
+    "FetchResult", "orders total saved skipped orders_stored stops_stored")
+
+SweepResult = collections.namedtuple(
+    "SweepResult", "considered requested orders_stored stops_stored")
+
+
+def sql_watermark(conn, source_key=ingest.DEFAULT_SOURCE):
+    """Return the highest Order Number stored for this Source, or None.
+
+    This is where an incremental run resumes from. It used to come from
+    listing 169,000 filenames; one query is cheaper, and correct even when the
+    sync daemon is halfway through re-enumerating the folder.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select max(order_number) from orders where source_key = %s",
+                    (source_key,))
+        return cur.fetchone()[0]
+
+
+def in_flight_order_numbers(conn, limit, source_key=ingest.DEFAULT_SOURCE):
+    """Return Order Numbers not yet in a Terminal Status, newest first.
+
+    Bounded by `limit`: each one costs a request against a rate-limited API,
+    so an unbounded sweep of a large backlog could run for hours.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select order_number from orders "
+                    "where source_key = %s and not is_terminal "
+                    "order by order_number desc limit %s", (source_key, limit))
+        return [row[0] for row in cur.fetchall()]
+
+
+def _store(conn, orders, source_key):
+    """Write a page's worth of Orders and commit, so a stopped run keeps them."""
+    if conn is None or not orders:
+        return 0, 0
+    result = ingest.ingest_orders(conn, orders, source_key)
+    conn.commit()
+    return result.orders_written, result.stops_written
+
+
 def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                    max_pages, out_dir=None, page_delay=0.5, overwrite=False,
                    refresh_stale=False, max_retries=5, retry_backoff=2.0,
-                   incremental=False):
-    """Page through /orders.json, saving each order as its own JSON file.
+                   incremental=False, conn=None, overlap_pages=0,
+                   source_key=ingest.DEFAULT_SOURCE):
+    """Page through /orders.json, storing each Order and saving it as a file.
 
-    out_dir is None to skip saving. A page_delay (seconds) pause is inserted
-    between consecutive page requests. A tqdm progress bar tracks orders.
+    Every Order retrieved is written to the database (conn), one commit per
+    page, so an interrupted run keeps what it already had. It is also written
+    to out_dir as JSON unless out_dir is None — the spreadsheet exporters still
+    read those files, and stopping would quietly shrink their reports.
 
-    An order is written only when its order_number has no file on disk yet;
-    see save_decision for the policy and for what overwrite/refresh_stale do.
+    Incremental runs resume from the highest Order Number in the database, but
+    always re-request the first `overlap_pages` pages regardless. Without that,
+    an Order fetched while In Flight would keep that status for ever: the
+    watermark means it is never looked at again. The revision guard throws away
+    everything that has not actually changed, so the overlap costs requests and
+    no writes.
 
     Transient request failures are retried (see request_json). If a page still
     fails after max_retries, the run stops gracefully and returns whatever was
-    already fetched/saved rather than crashing.
+    already fetched rather than crashing.
     """
     all_orders = []
     saved = skipped = 0
+    orders_stored = stops_stored = 0
     total = None
     page_num = 1
 
-    # One scan of the output directory answers both "already saved?" (per order)
-    # and "where did we leave off?" (the incremental watermark).
-    existing = saved_order_numbers(out_dir) if out_dir else set()
-    if out_dir:
-        logger.info("%d order(s) already on disk in %s", len(existing), out_dir)
-
-    # Incremental: stop paging once we reach an order_number we already have.
-    # The list is newest-first, so everything past the watermark is on disk.
-    watermark = max(existing) if (incremental and existing) else None
+    watermark = sql_watermark(conn, source_key) if (incremental and conn) else None
 
     policy = ("overwrite everything" if overwrite else
               "skip already-saved orders" + (", refresh non-terminal copies"
@@ -375,13 +392,14 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
     logger.info("Fetching orders: page_size=%d, max_pages=%d, page_delay=%.2fs, "
                 "policy=%s, max_retries=%d, out_dir=%s", page_size, max_pages,
                 page_delay, policy, max_retries,
-                out_dir if out_dir is not None else "(no save)")
+                out_dir if out_dir is not None else "(no files)")
     if incremental:
         if watermark is None:
-            logger.info("Incremental mode: no saved orders found — doing a full fetch.")
+            logger.info("Incremental mode: no Orders stored yet — doing a full fetch.")
         else:
-            logger.info("Incremental mode: fetching only orders newer than #%d "
-                        "(stops when an older/known order is reached).", watermark)
+            logger.info("Incremental mode: resuming after Order #%d, after "
+                        "re-requesting the first %d page(s) to catch Orders "
+                        "whose status has moved on.", watermark, overlap_pages)
 
     # Until the first response tells us the real count, bound the bar by what
     # the page settings could return; we shrink it to the true total below.
@@ -425,30 +443,32 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                 bar.refresh()
 
             page_saved = page_skipped = 0
+            page_orders = []
             reached_known = False
+            # The overlap pages are re-read in full; the watermark only applies
+            # once we are past them.
+            watermark_applies = watermark is not None and page_num > overlap_pages
             for o in orders:
                 ident = o.get("order_number") or o.get("id") or "unknown"
 
-                # Incremental watermark: orders are newest-first, so the first
-                # one at/below the watermark means everything left is on disk.
+                # Orders come back newest-first, so the first one at or below
+                # the watermark means everything left is already stored.
                 oid = order_id(o)
-                if watermark is not None and oid is not None and oid <= watermark:
+                if watermark_applies and oid is not None and oid <= watermark:
                     logger.debug("reached known order #%s (<= watermark #%d); "
                                  "stopping pagination", oid, watermark)
                     reached_known = True
                     break
 
+                page_orders.append(o)
+
                 if out_dir is not None:
                     path = order_path(o, out_dir)
-                    # oid covers the normal case without touching the filesystem;
-                    # orders with a non-numeric order_number fall back to a stat.
-                    known = oid in existing if oid is not None else os.path.exists(path)
+                    known = os.path.exists(path)
                     do_save, reason = save_decision(path, known, overwrite=overwrite,
                                                     refresh_stale=refresh_stale)
                     if do_save:
                         save_order(o, out_dir)
-                        if oid is not None:
-                            existing.add(oid)
                         saved += 1
                         page_saved += 1
                         logger.debug("save order %s (%s): status=%r", ident, reason,
@@ -460,16 +480,21 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                                      o.get("status"))
                 all_orders.append(o)
                 bar.update(1)
-            bar.set_postfix(page=page_num, saved=saved, skipped=skipped)
-            logger.debug("page %d: got %d order(s) (saved %d, skipped %d); "
-                         "running total %d%s", page_num, len(orders), page_saved,
-                         page_skipped, len(all_orders),
+
+            stored, stops = _store(conn, page_orders, source_key)
+            orders_stored += stored
+            stops_stored += stops
+
+            bar.set_postfix(page=page_num, stored=orders_stored, saved=saved)
+            logger.debug("page %d: got %d order(s) (stored %d, wrote %d file(s), "
+                         "skipped %d); running total %d%s", page_num, len(orders),
+                         stored, page_saved, page_skipped, len(all_orders),
                          f" of {total}" if total is not None else "")
 
-            # Incremental: we've crossed into already-downloaded territory.
+            # Incremental: we've crossed into already-stored territory.
             if reached_known:
-                logger.info("Reached already-downloaded orders at page %d; stopping. "
-                            "Fetched %d new order(s).", page_num, len(all_orders))
+                logger.info("Reached already-stored Orders at page %d; stopping. "
+                            "Fetched %d order(s).", page_num, len(all_orders))
                 break
 
             # Stop when this page wasn't full, or we've reached the reported count.
@@ -483,9 +508,72 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
     finally:
         bar.close()
 
-    logger.info("Done: retrieved %d order(s); wrote %d, skipped %d (already saved)",
-                len(all_orders), saved, skipped)
-    return all_orders, total, saved, skipped
+    logger.info("Done: retrieved %d order(s); stored %d, wrote %d file(s), "
+                "skipped %d (already saved)", len(all_orders), orders_stored,
+                saved, skipped)
+    return FetchResult(all_orders, total, saved, skipped, orders_stored, stops_stored)
+
+
+def sweep_in_flight(conn, cid, key, customer_number=None, password=None,
+                    timeout=30.0, limit=200, preview=False, request_delay=1.0,
+                    max_retries=5, retry_backoff=2.0, out_dir=None,
+                    overwrite=False, refresh_stale=False,
+                    source_key=ingest.DEFAULT_SOURCE):
+    """Re-request the Orders that are still In Flight, one at a time.
+
+    Paging overlap catches almost all of them far more cheaply — fifty Orders
+    per request against one. This is for the straggler that stalled long enough
+    to fall outside the overlap window, so it is opt-in and bounded.
+    """
+    numbers = in_flight_order_numbers(conn, limit, source_key)
+    if not numbers:
+        logger.info("No Orders are In Flight; nothing to sweep.")
+        return SweepResult(0, 0, 0, 0)
+
+    if preview:
+        logger.info("Would re-request %d In Flight Order(s): %s", len(numbers),
+                    ", ".join(f"#{n}" for n in numbers[:20])
+                    + (" ..." if len(numbers) > 20 else ""))
+        return SweepResult(len(numbers), 0, 0, 0)
+
+    logger.info("Sweeping %d In Flight Order(s), one request each.", len(numbers))
+    requested = orders_stored = stops_stored = 0
+    bar = tqdm(total=len(numbers), unit="order", desc="Sweep")
+    try:
+        for number in numbers:
+            try:
+                order = fetch_order(cid, number, key, customer_number, password,
+                                    timeout=timeout, max_retries=max_retries,
+                                    backoff=retry_backoff)
+            except APIRequestError as e:
+                logger.error("Stopping the sweep after repeated failures (%s). "
+                             "%d Order(s) re-requested so far; rerun to continue.",
+                             e, requested)
+                break
+            requested += 1
+            if not order:
+                logger.warning("Order #%s returned nothing; leaving it as it is.",
+                               number)
+                bar.update(1)
+                continue
+            if out_dir is not None:
+                path = order_path(order, out_dir)
+                do_save, _reason = save_decision(path, os.path.exists(path),
+                                                 overwrite=overwrite,
+                                                 refresh_stale=refresh_stale)
+                if do_save:
+                    save_order(order, out_dir)
+            stored, stops = _store(conn, [order], source_key)
+            orders_stored += stored
+            stops_stored += stops
+            bar.update(1)
+            time.sleep(request_delay)
+    finally:
+        bar.close()
+
+    logger.info("Sweep done: re-requested %d Order(s), updated %d.",
+                requested, orders_stored)
+    return SweepResult(len(numbers), requested, orders_stored, stops_stored)
 
 
 # ---------------------------------------------------------------------------
@@ -501,78 +589,9 @@ TRUNC_MARKER = "…[truncated]"
 # silently drops out-of-range writes, so we stop and warn instead.
 EXCEL_MAX_DATA_ROWS = 1_048_575
 
-# The signature_lines SVG runs to tens of KB per stop — useless in a spreadsheet
-# and it would blow up the file size, so it never reaches a cell.
-DROPPED_STOP_FIELDS = ("signature_lines",)
-
-# Column order for the two sheets. Fixed (rather than derived from the data) so
-# the workbook has a stable layout across runs; the same field lists are used by
-# process_route_stops.py.
-ORDER_FIELDS = (
-    "id",
-    "order_number",
-    "time",
-    "status",
-    "status_date",
-    "status_detail",
-    "origin",
-    "order_type",
-    "price",
-    "final_price",
-    "customer_number",
-    "cost_center",
-    "dispatch_driver",
-    "ready_time",
-    "deliver_by",
-    "flagged",
-    "read",
-    "pending",
-    "comm_override",
-    "recurring_name",
-    "optimized_route",
-    "version",
-)
-
-STOP_FIELDS = (
-    "route_stop_id",
-    "company",
-    "address",
-    "suite",
-    "city",
-    "state",
-    "postal_code",
-    "country",
-    "service_type",
-    "package",
-    "number_of_pieces",
-    "weight",
-    "vehicle",
-    "driver_number",
-    "paper_waybill",
-    "special_instructions",
-    "return_add",
-    "dispatch_message",
-    "notes",
-    "signature_contact",
-    "reference",
-    "signature",
-    "fuel_surcharge",
-    "route_status",
-    "route_status_detail",
-    "route_status_date",
-    "distance",
-    "air_distance",
-    "driver_pricelist",
-    "receive_date",
-    "dispatch_date",
-    "pickup_date",
-    "delivery_date",
-    "cancel_date",
-    "confirm_date",
-)
-
-# Order-level sheet: raw fields plus a few derived columns so the sheet is
-# usable on its own (first stop is the pickup, last stop the final delivery).
+# Order-level sheet: raw fields (see dwb.fields) plus a few derived columns so
+# the sheet is usable on its own (first stop is the pickup, last stop the
+# final delivery).
 ORDER_COLUMNS = list(ORDER_FIELDS) + [
     "flag_status",
     "stop_count",
@@ -612,7 +631,7 @@ def order_row(order):
     last = stops[-1] if stops else {}
     row = [cell_value(order.get(k)) for k in ORDER_FIELDS]
     row += [
-        order_status(order),
+        order_flags(order),
         len(stops),
         cell_value(first.get("company")),
         cell_value(first.get("city")),
@@ -732,8 +751,12 @@ def load_saved_orders(out_dir):
     return orders
 
 
-def order_status(o):
-    """Derive a readable status from the order's boolean flags."""
+def order_flags(o):
+    """Return the Order Flags — the read-state marker dispatch staff set.
+
+    pending / flagged / read describe whether a human has looked at the Order.
+    This is not Order Status: an Order can be flagged and Completed at once.
+    """
     if o.get("pending"):
         return "pending"
     if o.get("flagged"):
@@ -751,7 +774,7 @@ def summarize(orders):
         cust = o.get("customer_number", "?")
         ready = o.get("ready_time", "")
         price = o.get("final_price", o.get("price", ""))
-        print(f"  - #{num}  status={order_status(o)}  customer={cust}  "
+        print(f"  - #{num}  flags={order_flags(o)}  customer={cust}  "
               f"ready={ready}  price={price}")
     if len(orders) > 5:
         print(f"  ... and {len(orders) - 5} more")
@@ -781,10 +804,15 @@ def main():
     parser.add_argument("--retry-backoff", type=float, default=2.0,
                         help="Base seconds for exponential retry backoff (default 2.0).")
     parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout (s).")
+    parser.add_argument("--dsn", default=None,
+                        help="Postgres connection string for the Order store. "
+                             "Env: DWB_DSN, or a DWB_DSN line in .env.")
     parser.add_argument("--out-dir", default="./output/orders",
                         help="Directory for the per-order JSON files (default ./output/orders).")
-    parser.add_argument("--no-save", action="store_true",
-                        help="Skip writing JSON files; only print the summary.")
+    parser.add_argument("--no-json", "--no-save", dest="no_json", action="store_true",
+                        help="Stop writing the per-order JSON files. Orders still go "
+                             "to the database. The spreadsheet exporters still read "
+                             "those files, so leave this off until they are migrated.")
     parser.add_argument("--overwrite", "--no-skip-terminal", action="store_true",
                         help="Re-save every fetched order, even one already on disk "
                              "(default: an order whose file exists is never rewritten).")
@@ -793,9 +821,24 @@ def main():
                              "not yet completed/cancelled, so a copy captured while the "
                              "order was still in flight picks up its final state.")
     parser.add_argument("--incremental", action="store_true",
-                        help="Fetch only orders newer than the highest already saved, "
-                             "stopping pagination as soon as a known order is reached. "
-                             "Assumes a complete prior download in --out-dir.")
+                        help="Fetch only Orders newer than the highest one stored, "
+                             "stopping pagination as soon as a known Order is reached. "
+                             "Where to resume comes from the database, not the folder.")
+    parser.add_argument("--overlap-pages", type=int, default=5, metavar="N",
+                        help="Re-request the N most recent pages even under "
+                             "--incremental (default 5, i.e. 250 Orders). This is how "
+                             "an Order captured while In Flight picks up its final "
+                             "status; unchanged Orders cost no writes.")
+    parser.add_argument("--refresh-in-flight", action="store_true",
+                        help="After fetching, re-request the Orders still In Flight "
+                             "individually — the stragglers that fell outside the "
+                             "overlap window. One request each, so it is opt-in.")
+    parser.add_argument("--sweep-limit", type=int, default=200, metavar="N",
+                        help="Most Orders one --refresh-in-flight sweep will request "
+                             "(default 200). Newest first.")
+    parser.add_argument("--sweep-preview", action="store_true",
+                        help="Report which Orders --refresh-in-flight would request, "
+                             "and request none of them.")
     parser.add_argument("--excel", default="output/orders.xlsx", metavar="PATH",
                         help="Excel workbook to write: an 'orders' sheet (one row per order) "
                              "and a 'route_stops' sheet (one row per stop) "
@@ -829,33 +872,60 @@ def main():
 
     if args.excel_from_dir and args.no_excel:
         parser.error("--excel-from-dir has no effect with --no-excel")
-    if args.excel_from_dir and args.no_save:
+    if args.excel_from_dir and args.no_json:
         parser.error("--excel-from-dir reads the saved order files, so it can't be "
-                     "combined with --no-save")
+                     "combined with --no-json")
 
-    orders, _total, saved, skipped = get_all_orders(
-        cid=args.cid,
-        key=args.key,
-        customer_number=args.customer_number,
-        password=args.password,
-        page_size=args.page_size,
-        timeout=args.timeout,
-        max_pages=args.max_pages,
-        out_dir=None if args.no_save else args.out_dir,
-        page_delay=args.page_delay,
-        overwrite=args.overwrite,
-        refresh_stale=args.refresh_stale,
-        max_retries=args.max_retries,
-        retry_backoff=args.retry_backoff,
-        incremental=args.incremental,
-    )
+    # Connect before the first request: a run that fetches for twenty minutes
+    # and then discovers it cannot store anything has wasted rate limit.
+    try:
+        conn = db.connect(args.dsn)
+    except db.DatabaseUnavailable as e:
+        logger.error("%s", e)
+        return 2
+    logger.info("Order store: %s", db.safe_dsn(db.resolve_dsn(args.dsn)))
+
+    out_dir = None if args.no_json else args.out_dir
+    try:
+        result = get_all_orders(
+            cid=args.cid,
+            key=args.key,
+            customer_number=args.customer_number,
+            password=args.password,
+            page_size=args.page_size,
+            timeout=args.timeout,
+            max_pages=args.max_pages,
+            out_dir=out_dir,
+            page_delay=args.page_delay,
+            overwrite=args.overwrite,
+            refresh_stale=args.refresh_stale,
+            max_retries=args.max_retries,
+            retry_backoff=args.retry_backoff,
+            incremental=args.incremental,
+            conn=conn,
+            overlap_pages=max(0, args.overlap_pages),
+        )
+        orders, saved, skipped = result.orders, result.saved, result.skipped
+
+        if args.refresh_in_flight or args.sweep_preview:
+            sweep_in_flight(
+                conn, args.cid, args.key, args.customer_number, args.password,
+                timeout=args.timeout, limit=args.sweep_limit,
+                preview=args.sweep_preview, request_delay=args.page_delay,
+                max_retries=args.max_retries, retry_backoff=args.retry_backoff,
+                out_dir=out_dir, overwrite=args.overwrite,
+                refresh_stale=args.refresh_stale)
+    finally:
+        conn.close()
 
     if args.raw:
         print(json.dumps(orders, indent=2, ensure_ascii=False))
     else:
         summarize(orders)
 
-    if not args.no_save:
+    logger.info("Stored %d Order(s) and %d Route Stop(s) in the database",
+                result.orders_stored, result.stops_stored)
+    if not args.no_json:
         logger.info("Wrote %d order file(s) to %s/ (%d already-saved order(s) skipped)",
                     saved, args.out_dir, skipped)
 
@@ -868,7 +938,8 @@ def main():
                                            with_stops=not args.no_excel_stops)
         logger.info("Excel workbook: %s (%d order row(s), %d stop row(s))",
                     os.path.abspath(args.excel), n_orders, n_stops)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
