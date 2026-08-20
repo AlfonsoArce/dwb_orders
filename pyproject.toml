@@ -8,11 +8,24 @@ license = { text = "MIT" }
 authors = [{ name = "Alfonso Arce" }]
 dependencies = [
     "pdfplumber>=0.11.8",
+    "psycopg[binary]>=3.2",
     "rapidfuzz>=3.13.0",
     "tqdm>=4.67",
+    "tzdata>=2025.1",
     "usaddress-scourgify>=0.6.0",
     "xlsxwriter>=3.2.9",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The entry points are scripts at the repository root, and dwb/ is imported
+# relative to it; this is not an installed package (see [tool.uv] below).
+pythonpath = ["."]
 
 [tool.uv]
 # This is an application, not a distributable package.

@@ -1,0 +1,51 @@
+# Postgres for the Order store, plus a browser client.
+#
+# Both services bind to 127.0.0.1 only: nothing here is reachable from the
+# network. The published Postgres port is 5434 because 5432 and 5433 are
+# already taken by the TMS and billing databases on this machine.
+#
+# Database storage is a named Docker volume, never a bind mount. This
+# repository lives inside iCloud Drive, and a Postgres data directory under a
+# sync daemon gets corrupted.
+#
+# Settings come from .env (see .env.example):
+#   POSTGRES_PASSWORD  the database password, the one place it is written
+#   DWB_PG_PORT        host port for Postgres      (default 5434)
+#   DWB_ADMINER_PORT   host port for Adminer       (default 8081)
+
+services:
+  db:
+    image: postgres:18
+    container_name: dwb-orders-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dwb_orders
+      POSTGRES_USER: dwb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${DWB_PG_PORT:-5434}:5432"
+    volumes:
+      # Postgres 18 wants the whole /var/lib/postgresql, not just data/, so
+      # that a future pg_upgrade --link stays inside one mount point.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dwb -d dwb_orders"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  adminer:
+    image: adminer:5
+    container_name: dwb-orders-adminer
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    ports:
+      - "127.0.0.1:${DWB_ADMINER_PORT:-8081}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+    name: dwb_orders_pgdata
