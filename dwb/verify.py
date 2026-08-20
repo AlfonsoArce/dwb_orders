@@ -22,7 +22,7 @@ import sys
 
 from tqdm import tqdm
 
-from dwb import archive, db, ingest
+from dwb import archive, coerce, db, ingest
 from dwb.config import load_dotenv
 
 DEFAULT_SAMPLE = 200
@@ -66,7 +66,9 @@ class Report:
     def lines(self):
         yield f"Archive:            {self.input_dir}"
         yield f"Files found:        {self.files_found}"
-        yield f"Files not read:     {sum(self.problems.values())}"
+        yield f"Files not read:     {sum(self.problems.values())}" \
+              + ("   (unread means unverified, so the check fails)"
+                 if sum(self.problems.values()) else "")
         for name in archive.PROBLEMS:
             yield f"  {name + ':':<16}{self.problems[name]}"
         yield f"Orders   in archive: {self.archive_orders:>9}   stored: {self.stored_orders:>9}"
@@ -97,6 +99,10 @@ def _scan_archive(input_dir, report, show_progress=False):
     """
     winners = {}
     revisions = {}
+    # Sorts as a date, not as a string: the API sends timestamps in several
+    # formats, and only one of them happens to sort correctly as text. The
+    # import picks its winner the same way, so the two must agree.
+    earliest = coerce.timestamp("1900-01-01 00:00:00")
     files = archive.list_order_files(input_dir)
     report.files_found = len(files)
     for name, _number in tqdm(files, desc="Reading archive", unit="file",
@@ -106,7 +112,7 @@ def _scan_archive(input_dir, report, show_progress=False):
             report.problems[problem] += 1
             continue
         number = int(order["order_number"])
-        revision = str(order.get("version") or "")
+        revision = coerce.timestamp(order.get("version")) or earliest
         if number in winners and revisions[number] >= revision:
             continue
         winners[number] = (name, len(order.get("route_stops") or []))
@@ -262,10 +268,8 @@ def main(argv=None):
     if not os.path.isdir(args.input_dir):
         print(f"No such directory: {args.input_dir}", file=sys.stderr)
         return 2
-    try:
-        conn = db.connect(args.dsn)
-    except db.DatabaseUnavailable as e:
-        print(str(e), file=sys.stderr)
+    conn = db.connect_or_exit(args.dsn)
+    if conn is None:
         return 2
 
     try:

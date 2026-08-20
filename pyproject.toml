@@ -19,6 +19,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    # The documented pre-push checks (.claude/commands/gitpush.md) run ruff.
+    "ruff>=0.16",
 ]
 
 [tool.pytest.ini_options]

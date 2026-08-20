@@ -134,10 +134,8 @@ def main(argv=None):
                    help="Report what is applied and what is pending; change nothing.")
     args = p.parse_args(argv)
 
-    try:
-        conn = db.connect(args.dsn)
-    except db.DatabaseUnavailable as e:
-        print(str(e), file=sys.stderr)
+    conn = db.connect_or_exit(args.dsn)
+    if conn is None:
         return 2
 
     try:

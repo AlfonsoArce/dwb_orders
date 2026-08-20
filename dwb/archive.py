@@ -12,6 +12,8 @@ import json
 import os
 import re
 
+from dwb import coerce
+
 # order_<number>.json, plus whatever the sync daemon appended to the stem when
 # it made a conflict copy (" 2", " (Case Conflict 3)", " copy").
 ORDER_FILE_RE = re.compile(r"^order_(?P<number>\d+)(?P<conflict>[ (].*)?\.json$",
@@ -23,7 +25,7 @@ ORDER_FILE_RE = re.compile(r"^order_(?P<number>\d+)(?P<conflict>[ (].*)?\.json$"
 VANISHED = "vanished"      # listed, then gone before it could be read
 EMPTY = "empty"            # zero bytes, or nothing but whitespace
 UNREADABLE = "unreadable"  # I/O error, bad encoding, or malformed JSON
-UNUSABLE = "unusable"      # readable JSON, but no Order Number to key it by
+UNUSABLE = "unusable"      # readable JSON, but no usable Order Number to key it by
 
 PROBLEMS = (VANISHED, EMPTY, UNREADABLE, UNUSABLE)
 
@@ -62,6 +64,8 @@ def read_order_file(path):
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None, UNREADABLE
 
-    if not isinstance(order, dict) or order.get("order_number") in (None, ""):
+    # Without an Order Number there is nothing to key the Order by, and a
+    # non-numeric one would fail at the column rather than be counted here.
+    if not isinstance(order, dict) or coerce.integer(order.get("order_number")) is None:
         return None, UNUSABLE
     return order, None

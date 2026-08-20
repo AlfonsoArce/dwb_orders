@@ -262,8 +262,12 @@ def is_terminal(order):
     return str(order.get("status", "")).strip().lower() in TERMINAL_STATUSES
 
 
-def order_id(order):
-    """Return the order_number as an int, or None if it isn't numeric."""
+def order_number_of(order):
+    """Return the Order Number as an int, or None if it isn't numeric.
+
+    Not `order_id`: that is the surrogate key the database assigns (ADR-0002),
+    and the glossary keeps the two apart on purpose.
+    """
     try:
         return int(order.get("order_number"))
     except (TypeError, ValueError):
@@ -352,6 +356,9 @@ def _store(conn, orders, source_key):
         return 0, 0
     result = ingest.ingest_orders(conn, orders, source_key)
     conn.commit()
+    if result.orders_unusable:
+        logger.warning("%d order(s) had no usable order_number and were not "
+                       "stored", result.orders_unusable)
     return result.orders_written, result.stops_written
 
 
@@ -453,7 +460,7 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
 
                 # Orders come back newest-first, so the first one at or below
                 # the watermark means everything left is already stored.
-                oid = order_id(o)
+                oid = order_number_of(o)
                 if watermark_applies and oid is not None and oid <= watermark:
                     logger.debug("reached known order #%s (<= watermark #%d); "
                                  "stopping pagination", oid, watermark)
@@ -878,10 +885,8 @@ def main():
 
     # Connect before the first request: a run that fetches for twenty minutes
     # and then discovers it cannot store anything has wasted rate limit.
-    try:
-        conn = db.connect(args.dsn)
-    except db.DatabaseUnavailable as e:
-        logger.error("%s", e)
+    conn = db.connect_or_exit(args.dsn, report=logger.error)
+    if conn is None:
         return 2
     logger.info("Order store: %s", db.safe_dsn(db.resolve_dsn(args.dsn)))
 

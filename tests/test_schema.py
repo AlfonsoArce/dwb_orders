@@ -163,7 +163,8 @@ def test_terminal_status_is_derived_from_order_status(conn):
     add_order(conn, 2, "Cancelled")
     add_order(conn, 3, "Confirmed")   # In Flight, per the spec's assumption
     add_order(conn, 4, "Dispatched")
+    add_order(conn, 5, None)          # no status at all is not Terminal either
 
     in_flight = rows(conn, "select order_number from orders where not is_terminal "
                            "order by order_number")
-    assert in_flight == [(3,), (4,)]
+    assert in_flight == [(3,), (4,), (5,)]

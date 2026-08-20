@@ -100,7 +100,7 @@ ORDER_COLUMNS = tuple(name for name, _ in ORDER_STAGING)
 STOP_COLUMNS = tuple(name for name, _ in STOP_STAGING)
 
 IngestResult = collections.namedtuple(
-    "IngestResult", "orders_seen orders_written stops_written")
+    "IngestResult", "orders_seen orders_written stops_written orders_unusable")
 
 
 def _staging_ddl(name, spec):
@@ -171,8 +171,8 @@ def stop_values(stop, order, position, source_key=DEFAULT_SOURCE,
         coerce.text(contact.get("phone")),
         coerce.text(stop.get("service_type")),
         coerce.text(stop.get("package")),
-        coerce.number(stop.get("number_of_pieces")),
-        coerce.number(stop.get("weight")),
+        coerce.quantity(stop.get("number_of_pieces")),
+        coerce.quantity(stop.get("weight")),
         coerce.text(stop.get("vehicle")),
         coerce.text(stop.get("driver_number")),
         coerce.text(stop.get("driver_pricelist")),
@@ -253,16 +253,21 @@ def _replace_stops_sql():
     return REPLACE_STOPS.format(columns=columns, qualified=qualified)
 
 
-def ingest_orders(conn, orders, source_key=DEFAULT_SOURCE,
-                  timezone=coerce.EASTERN):
+def ingest_orders(conn, orders, source_key=DEFAULT_SOURCE):
     """Write a batch of Order payloads; return what was actually written.
 
     Orders whose stored revision is already at least as new are left alone,
     and so are their Route Stops. The caller commits.
+
+    An Order with no usable Order Number cannot be keyed, and is counted and
+    dropped rather than allowed to abort the batch around it.
     """
-    orders = [o for o in orders if isinstance(o, dict)]
+    timezone = coerce.EASTERN
+    seen = [o for o in orders if isinstance(o, dict)]
+    orders = [o for o in seen if coerce.integer(o.get("order_number")) is not None]
+    unusable = len(seen) - len(orders)
     if not orders:
-        return IngestResult(0, 0, 0)
+        return IngestResult(len(seen), 0, 0, unusable)
 
     ensure_staging(conn)
     with conn.cursor() as cur:
@@ -291,4 +296,4 @@ def ingest_orders(conn, orders, source_key=DEFAULT_SOURCE,
         # keeps the transaction open for several batches starts each clean.
         cur.execute("truncate staging_orders, staging_stops")
 
-    return IngestResult(len(orders), len(written), stops_written)
+    return IngestResult(len(seen), len(written), stops_written, unusable)

@@ -100,6 +100,18 @@ def test_damaged_files_are_counted_separately_and_not_skipped(archive, load, db)
     assert one(db, "select count(*) from orders") == (2,)
 
 
+def test_an_order_number_that_is_not_a_number_is_counted_not_fatal(
+        archive, load, db):
+    fill(archive, 2)
+    write_order(archive, make_order(order_number="ABC"), filename="order_500001.json")
+
+    result = load()
+
+    assert "  unusable:       1" in result.stdout
+    # The Orders around it still landed: one bad file must not lose the batch.
+    assert one(db, "select count(*) from orders") == (2,)
+
+
 def test_sync_conflict_copies_are_matched_rather_than_ignored(archive, load, db):
     write_order(archive, make_order(order_number=401791, status="Confirmed"))
     write_order(archive, make_order(order_number=401791, status="Completed",

@@ -168,10 +168,8 @@ def main(argv=None):
         print(f"No such directory: {args.input_dir}", file=sys.stderr)
         return 2
 
-    try:
-        conn = db.connect(args.dsn)
-    except db.DatabaseUnavailable as e:
-        print(str(e), file=sys.stderr)
+    conn = db.connect_or_exit(args.dsn)
+    if conn is None:
         return 2
 
     try:
@@ -180,9 +178,6 @@ def main(argv=None):
                 conn, args.input_dir, source_key=args.source,
                 batch_size=args.batch_size, limit=args.limit,
                 restart=args.restart, show_progress=args.progress)
-    except db.DatabaseUnavailable as e:
-        print(str(e), file=sys.stderr)
-        return 2
     finally:
         conn.close()
 

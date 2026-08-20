@@ -5,6 +5,8 @@ resolves the connection string, supplies the password the string deliberately
 omits, and turns a failure to connect into a message that says what to do.
 """
 
+import sys
+
 import psycopg
 from psycopg import conninfo as _conninfo
 
@@ -38,6 +40,22 @@ def connect(dsn=None, autocommit=False, connect_timeout=10):
             f"Cannot reach the Order store at {safe_dsn(dsn)}: {str(e).strip()}\n"
             "Is it running? Start it with:  docker compose up -d"
         )
+
+
+def connect_or_exit(dsn=None, report=None):
+    """Connect, or report why and return None.
+
+    Every entry point opens its connection before doing any work — a run that
+    fetches for twenty minutes and then finds it cannot store anything has
+    wasted rate limit — and every one of them wants the same message when that
+    fails, so it lives here once.
+    """
+    report = report or (lambda message: print(message, file=sys.stderr))
+    try:
+        return connect(dsn)
+    except DatabaseUnavailable as e:
+        report(str(e))
+        return None
 
 
 def safe_dsn(dsn):

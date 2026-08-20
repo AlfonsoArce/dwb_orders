@@ -77,7 +77,7 @@ def money(value):
 
 
 # Quantities are exact for the same reason prices are: they get multiplied.
-number = money
+quantity = money
 
 
 def integer(value):

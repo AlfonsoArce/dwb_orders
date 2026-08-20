@@ -114,6 +114,16 @@ def test_no_credentials_appear_in_the_output(fetch, dispatch, database):
     assert "hunter2" not in output
 
 
+def test_an_order_without_a_usable_number_does_not_lose_the_page(
+        fetch, dispatch, db):
+    dispatch.add(make_order(401791))
+    dispatch.orders[0] = make_order("")  # keyed at 0 so it rides along on the page
+
+    fetch()
+
+    assert rows(db, "select order_number from orders") == [(401791,)]
+
+
 # --- 08: the watermark comes from SQL, and recent pages are re-read --------
 
 def test_an_empty_database_causes_a_full_fetch(fetch, dispatch, db):

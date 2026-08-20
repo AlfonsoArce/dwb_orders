@@ -213,9 +213,11 @@ def make_order(order_number=401791, stops=None, **overrides):
     """Return an Order payload shaped like the API's."""
     # The dispatch system's own ids run a fixed distance below the Order
     # Number in the real data; deriving them keeps every fixture Order
-    # distinct, which the uniqueness constraints care about.
+    # distinct, which the uniqueness constraints care about. A test may pass a
+    # deliberately unusable Order Number, which has no arithmetic.
+    numeric = order_number if isinstance(order_number, int) else 0
     order = {
-        "id": order_number - 10301,
+        "id": numeric - 10301,
         "time": "Tue, 25 Nov 2025 11:02:47",
         "order_number": order_number,
         "price": "60",
@@ -241,7 +243,7 @@ def make_order(order_number=401791, stops=None, **overrides):
     order.update(overrides)
     if stops is None:
         stops = [dict(FIRST_STOP),
-                 dict(FINAL_STOP, route_stop_id=order_number - 9985)]
+                 dict(FINAL_STOP, route_stop_id=numeric - 9985)]
     order["route_stops"] = stops
     return order
 
