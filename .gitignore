@@ -47,3 +47,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Agent working state — tickets and specs reference customer data (see input/, output/ above)
+.scratch/
