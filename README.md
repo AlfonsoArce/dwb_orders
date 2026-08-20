@@ -6,12 +6,14 @@ saves each order as its own JSON file.
 
 It pages through `GET /{CID}/orders.json`, handles the API's Windows-1252
 encoding, shows a progress bar, redacts your API key from all log output, and
-writes one `order_<number>.json` file per order. Orders in a terminal state
-(completed/cancelled) that are already saved are skipped on re-runs.
+writes one `order_<number>.json` file per order plus an Excel workbook
+(`output/orders.xlsx`). An order is only written when it isn't already on disk,
+so re-runs cost no writes.
 
 ## What's in the repo
 
 - [`get_orders.py`](get_orders.py) — fetch orders from the Digital Waybill API
+  (writes the per-order JSON files and, by default, an `orders.xlsx` workbook)
 - [`process_route_stops.py`](process_route_stops.py) — flatten every `route_stop`
   from downloaded orders into a single `.xlsx` (one row per stop)
 - [`route_stops_by_cost_center.py`](route_stops_by_cost_center.py) — group
@@ -78,14 +80,64 @@ uv run get_orders.py --raw
 # write order files somewhere else
 uv run get_orders.py --out-dir ./data
 
-# re-download terminal orders even if already saved
-uv run get_orders.py --no-skip-terminal
+# put the workbook elsewhere, or skip it entirely
+uv run get_orders.py --excel reports/orders.xlsx
+uv run get_orders.py --no-excel
+
+# incremental fetch, but rebuild the workbook from the whole archive on disk
+uv run get_orders.py --incremental --excel-from-dir
+
+# re-save orders that are already on disk
+uv run get_orders.py --overwrite            # all of them
+uv run get_orders.py --refresh-stale        # only ones stored mid-flight
 
 # keep the console to the progress bar, capture full logs to a file
 uv run get_orders.py --console-level ERROR --log-level DEBUG --log-file logs/fetch.log
 ```
 
 Run `uv run get_orders.py --help` for the full list of flags.
+
+### When an order gets written
+
+One scan of `--out-dir` builds the set of `order_number`s already on disk, and
+that decides every write:
+
+| Case | Written? |
+| ---- | -------- |
+| No file for that `order_number` | yes |
+| File already exists | **no** — this is the default, and it's why a re-run costs zero writes |
+| File exists, `--refresh-stale` and the *stored* copy isn't completed/cancelled | yes |
+| File exists, `--overwrite` | yes |
+
+The default means an order first captured while still in flight (`New`,
+`Confirmed`, `PickedUp`, `Dispatched` — about 1% of the archive) keeps that
+early snapshot and never picks up its completed state. `--refresh-stale` is the
+targeted fix: it reads each already-saved copy's status and rewrites only the
+ones that hadn't finished, leaving the immutable ones alone. `--overwrite`
+(formerly `--no-skip-terminal`, still accepted) rewrites everything.
+
+Avoiding needless writes matters most when `--out-dir` sits in a synced folder
+such as iCloud Drive — every rewrite is another sync round-trip and another
+chance of a `order_1234 2.json` conflict copy. Keeping the archive on a local
+disk (`--out-dir ~/dwb_data/orders`) avoids that entirely.
+
+### The Excel workbook
+
+Every run also writes `output/orders.xlsx` (override with `--excel PATH`,
+disable with `--no-excel`) covering the orders fetched in that run:
+
+| Sheet         | Contents                                                                 |
+| ------------- | ------------------------------------------------------------------------ |
+| `orders`      | one row per order — the order-level fields plus `flag_status`, `stop_count`, and the first/last stop's company + city |
+| `route_stops` | one row per stop, keyed by `order_number` with `stop_index` — drop it with `--no-excel-stops` |
+
+The `signature_lines` SVG is never written to a cell (tens of KB per stop), and
+text over Excel's 32,767-character cell limit is truncated with a marker.
+
+Under `--incremental` a run only fetches new orders, so the workbook would cover
+just those. Add `--excel-from-dir` to build it from every `order_*.json` in
+`--out-dir` instead. A worksheet holds ~1.05M rows; past that the run warns and
+`process_route_stops.py` is the way to get every stop.
 
 ### Post-processing the downloaded orders
 

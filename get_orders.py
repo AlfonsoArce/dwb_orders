@@ -19,6 +19,13 @@ Example .env (see .env.example):
 
 Then just run:
     python3 get_orders.py
+
+Each run writes the per-order JSON files plus an Excel workbook of the fetched
+orders (output/orders.xlsx by default). Use --excel PATH to relocate it or
+--no-excel to skip it.
+
+An order is only written when its order_number isn't already on disk; see
+--overwrite and --refresh-stale to change that.
 """
 
 import argparse
@@ -32,6 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import xlsxwriter
 from tqdm import tqdm
 
 BASE_URL = "https://api.dwaybill.com"
@@ -69,7 +77,7 @@ class TqdmLoggingHandler(logging.Handler):
         try:
             tqdm.write(self.format(record), file=sys.stderr)
             self.flush()
-        except Exception:  # pragma: no cover - logging must never crash the app
+        except Exception:  # pragma: no cover - a handler must never crash the app  # noqa: BLE001
             self.handleError(record)
 
 
@@ -268,21 +276,57 @@ def order_id(order):
         return None
 
 
-def highest_saved_order(out_dir):
-    """Return the largest order_number already saved in out_dir, or None.
+def saved_order_numbers(out_dir):
+    """Return the set of order_numbers already saved in out_dir.
 
-    Derived from the order_<n>.json filenames (no files are opened), so it is
-    cheap even for very large archives. Used as the incremental watermark.
+    Derived from the order_<n>.json filenames (no files are opened), so one
+    directory scan answers "do we already have this order?" for the whole run —
+    much cheaper than an os.path.exists() per order, which matters when the
+    archive is large or sitting in a synced folder.
     """
-    if not os.path.isdir(out_dir):
-        return None
-    best = None
-    for name in os.listdir(out_dir):
-        m = re.match(r"order_(\d+)\.json$", name)
-        if m:
-            n = int(m.group(1))
-            best = n if best is None or n > best else best
-    return best
+    nums = set()
+    if not out_dir or not os.path.isdir(out_dir):
+        return nums
+    with os.scandir(out_dir) as it:
+        for e in it:
+            m = re.match(r"order_(\d+)\.json$", e.name)
+            if m:
+                nums.add(int(m.group(1)))
+    return nums
+
+
+def saved_is_terminal(path):
+    """True if the order already on disk is in a terminal state.
+
+    Only the saved copy's status is read. An unreadable file counts as
+    non-terminal so it gets rewritten rather than left corrupt.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return is_terminal(json.load(fh))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def save_decision(path, known, overwrite=False, refresh_stale=False):
+    """Decide whether an order needs writing; return (save?, reason).
+
+    Default policy: an order whose file already exists is never rewritten. The
+    archive is the source of truth and a redundant write is pure cost — in a
+    synced folder (iCloud/Dropbox) it also means another sync round-trip and a
+    chance of a conflict copy.
+
+    overwrite rewrites everything. refresh_stale rewrites only those whose
+    saved copy is still in flight, which is how a copy captured while the order
+    was open eventually picks up its completed state.
+    """
+    if not known:
+        return True, "new"
+    if overwrite:
+        return True, "overwrite requested"
+    if refresh_stale and not saved_is_terminal(path):
+        return True, "saved copy not terminal"
+    return False, "already saved"
 
 
 def save_order(order, out_dir):
@@ -295,16 +339,16 @@ def save_order(order, out_dir):
 
 
 def get_all_orders(cid, key, customer_number, password, page_size, timeout,
-                   max_pages, out_dir=None, page_delay=0.5, skip_terminal=True,
-                   max_retries=5, retry_backoff=2.0, incremental=False):
+                   max_pages, out_dir=None, page_delay=0.5, overwrite=False,
+                   refresh_stale=False, max_retries=5, retry_backoff=2.0,
+                   incremental=False):
     """Page through /orders.json, saving each order as its own JSON file.
 
     out_dir is None to skip saving. A page_delay (seconds) pause is inserted
     between consecutive page requests. A tqdm progress bar tracks orders.
 
-    When skip_terminal is True, an order in a terminal state (completed or
-    cancelled) is left untouched if its file already exists on disk, since
-    such orders are immutable and need not be downloaded/written again.
+    An order is written only when its order_number has no file on disk yet;
+    see save_decision for the policy and for what overwrite/refresh_stale do.
 
     Transient request failures are retried (see request_json). If a page still
     fails after max_retries, the run stops gracefully and returns whatever was
@@ -315,13 +359,22 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
     total = None
     page_num = 1
 
+    # One scan of the output directory answers both "already saved?" (per order)
+    # and "where did we leave off?" (the incremental watermark).
+    existing = saved_order_numbers(out_dir) if out_dir else set()
+    if out_dir:
+        logger.info("%d order(s) already on disk in %s", len(existing), out_dir)
+
     # Incremental: stop paging once we reach an order_number we already have.
     # The list is newest-first, so everything past the watermark is on disk.
-    watermark = highest_saved_order(out_dir) if (incremental and out_dir) else None
+    watermark = max(existing) if (incremental and existing) else None
 
+    policy = ("overwrite everything" if overwrite else
+              "skip already-saved orders" + (", refresh non-terminal copies"
+                                             if refresh_stale else ""))
     logger.info("Fetching orders: page_size=%d, max_pages=%d, page_delay=%.2fs, "
-                "skip_terminal=%s, max_retries=%d, out_dir=%s", page_size, max_pages,
-                page_delay, skip_terminal, max_retries,
+                "policy=%s, max_retries=%d, out_dir=%s", page_size, max_pages,
+                page_delay, policy, max_retries,
                 out_dir if out_dir is not None else "(no save)")
     if incremental:
         if watermark is None:
@@ -386,21 +439,25 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                     break
 
                 if out_dir is not None:
-                    if (skip_terminal and is_terminal(o)
-                            and os.path.exists(order_path(o, out_dir))):
-                        skipped += 1
-                        page_skipped += 1
-                        logger.debug("skip order %s: status=%r is terminal and already "
-                                     "saved at %s", ident, o.get("status"),
-                                     order_path(o, out_dir))
-                    else:
+                    path = order_path(o, out_dir)
+                    # oid covers the normal case without touching the filesystem;
+                    # orders with a non-numeric order_number fall back to a stat.
+                    known = oid in existing if oid is not None else os.path.exists(path)
+                    do_save, reason = save_decision(path, known, overwrite=overwrite,
+                                                    refresh_stale=refresh_stale)
+                    if do_save:
                         save_order(o, out_dir)
+                        if oid is not None:
+                            existing.add(oid)
                         saved += 1
                         page_saved += 1
-                        logger.debug("save order %s: status=%r (%s)", ident,
-                                     o.get("status"),
-                                     "not terminal" if not is_terminal(o)
-                                     else "terminal but not yet saved")
+                        logger.debug("save order %s (%s): status=%r", ident, reason,
+                                     o.get("status"))
+                    else:
+                        skipped += 1
+                        page_skipped += 1
+                        logger.debug("skip order %s (%s): status=%r", ident, reason,
+                                     o.get("status"))
                 all_orders.append(o)
                 bar.update(1)
             bar.set_postfix(page=page_num, saved=saved, skipped=skipped)
@@ -426,9 +483,253 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
     finally:
         bar.close()
 
-    logger.info("Done: retrieved %d order(s); saved %d, skipped %d (terminal, "
-                "already downloaded)", len(all_orders), saved, skipped)
+    logger.info("Done: retrieved %d order(s); wrote %d, skipped %d (already saved)",
+                len(all_orders), saved, skipped)
     return all_orders, total, saved, skipped
+
+
+# ---------------------------------------------------------------------------
+# Excel workbook output
+# ---------------------------------------------------------------------------
+
+# Excel cells max out at 32,767 chars; longer text is truncated with a marker
+# so a single outlier row can't abort the whole write.
+EXCEL_CELL_LIMIT = 32_767
+TRUNC_MARKER = "…[truncated]"
+
+# A worksheet holds 1,048,576 rows; one of ours is the header. xlsxwriter
+# silently drops out-of-range writes, so we stop and warn instead.
+EXCEL_MAX_DATA_ROWS = 1_048_575
+
+# The signature_lines SVG runs to tens of KB per stop — useless in a spreadsheet
+# and it would blow up the file size, so it never reaches a cell.
+DROPPED_STOP_FIELDS = ("signature_lines",)
+
+# Column order for the two sheets. Fixed (rather than derived from the data) so
+# the workbook has a stable layout across runs; the same field lists are used by
+# process_route_stops.py.
+ORDER_FIELDS = (
+    "id",
+    "order_number",
+    "time",
+    "status",
+    "status_date",
+    "status_detail",
+    "origin",
+    "order_type",
+    "price",
+    "final_price",
+    "customer_number",
+    "cost_center",
+    "dispatch_driver",
+    "ready_time",
+    "deliver_by",
+    "flagged",
+    "read",
+    "pending",
+    "comm_override",
+    "recurring_name",
+    "optimized_route",
+    "version",
+)
+
+STOP_FIELDS = (
+    "route_stop_id",
+    "company",
+    "address",
+    "suite",
+    "city",
+    "state",
+    "postal_code",
+    "country",
+    "service_type",
+    "package",
+    "number_of_pieces",
+    "weight",
+    "vehicle",
+    "driver_number",
+    "paper_waybill",
+    "special_instructions",
+    "return_add",
+    "dispatch_message",
+    "notes",
+    "signature_contact",
+    "reference",
+    "signature",
+    "fuel_surcharge",
+    "route_status",
+    "route_status_detail",
+    "route_status_date",
+    "distance",
+    "air_distance",
+    "driver_pricelist",
+    "receive_date",
+    "dispatch_date",
+    "pickup_date",
+    "delivery_date",
+    "cancel_date",
+    "confirm_date",
+)
+
+# Order-level sheet: raw fields plus a few derived columns so the sheet is
+# usable on its own (first stop is the pickup, last stop the final delivery).
+ORDER_COLUMNS = list(ORDER_FIELDS) + [
+    "flag_status",
+    "stop_count",
+    "first_stop_company",
+    "first_stop_city",
+    "last_stop_company",
+    "last_stop_city",
+]
+
+STOP_COLUMNS = (
+    ["order_number", "stop_index", "stop_count"]
+    + [k for k in STOP_FIELDS if k not in DROPPED_STOP_FIELDS]
+    + ["contact_name", "contact_phone", "packages_json"]
+)
+
+
+def cell_value(v):
+    """Coerce a JSON value into something xlsxwriter can write to a cell."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v
+    if not isinstance(v, str):
+        # Lists/dicts with no dedicated column get JSON-serialized as a fallback.
+        v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+    if len(v) > EXCEL_CELL_LIMIT:
+        return v[: EXCEL_CELL_LIMIT - len(TRUNC_MARKER)] + TRUNC_MARKER
+    return v
+
+
+def order_row(order):
+    """Build the "orders" sheet row for one order."""
+    stops = order.get("route_stops") or []
+    first = stops[0] if stops else {}
+    last = stops[-1] if stops else {}
+    row = [cell_value(order.get(k)) for k in ORDER_FIELDS]
+    row += [
+        order_status(order),
+        len(stops),
+        cell_value(first.get("company")),
+        cell_value(first.get("city")),
+        cell_value(last.get("company")),
+        cell_value(last.get("city")),
+    ]
+    return row
+
+
+def stop_rows(order):
+    """Yield one "route_stops" sheet row per stop, prefixed with order context."""
+    stops = order.get("route_stops") or []
+    stop_count = len(stops)
+    for i, stop in enumerate(stops, start=1):
+        if not isinstance(stop, dict):
+            continue
+        contact = stop.get("contact") or {}
+        packages = stop.get("packages")
+        yield (
+            [cell_value(order.get("order_number")), i, stop_count]
+            + [cell_value(stop.get(k)) for k in STOP_FIELDS if k not in DROPPED_STOP_FIELDS]
+            + [
+                cell_value(contact.get("name")),
+                cell_value(contact.get("phone")),
+                cell_value(packages) if packages is not None else "",
+            ]
+        )
+
+
+def write_workbook(orders, path, with_stops=True):
+    """Write `orders` to an .xlsx workbook and return (order_rows, stop_rows).
+
+    Sheet "orders" holds one row per order; sheet "route_stops" (unless
+    with_stops is False) holds one row per stop, keyed by order_number.
+
+    constant_memory streams rows straight to disk, which keeps large archives
+    from ballooning in RAM — the trade-off is that rows must be written in order
+    and a finished sheet can't be revisited, hence the two sequential passes.
+    """
+    out_dir = os.path.dirname(os.path.abspath(path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    book = xlsxwriter.Workbook(path, {"constant_memory": True, "strings_to_urls": False})
+    bold = book.add_format({"bold": True})
+    n_orders = n_stops = 0
+    try:
+        sheet = book.add_worksheet("orders")
+        sheet.write_row(0, 0, ORDER_COLUMNS, bold)
+        sheet.freeze_panes(1, 0)
+        dropped_orders = dropped_stops = 0
+        for o in orders:
+            if not isinstance(o, dict):
+                continue
+            if n_orders >= EXCEL_MAX_DATA_ROWS:
+                dropped_orders += 1
+                continue
+            n_orders += 1
+            sheet.write_row(n_orders, 0, order_row(o))
+        if dropped_orders:
+            logger.warning("orders sheet hit Excel's %d-row limit; %d order(s) omitted",
+                           EXCEL_MAX_DATA_ROWS, dropped_orders)
+
+        if with_stops:
+            stops_sheet = book.add_worksheet("route_stops")
+            stops_sheet.write_row(0, 0, STOP_COLUMNS, bold)
+            stops_sheet.freeze_panes(1, 0)
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                for row in stop_rows(o):
+                    if n_stops >= EXCEL_MAX_DATA_ROWS:
+                        dropped_stops += 1
+                        continue
+                    n_stops += 1
+                    stops_sheet.write_row(n_stops, 0, row)
+            if dropped_stops:
+                logger.warning("route_stops sheet hit Excel's %d-row limit; %d stop(s) "
+                               "omitted — use process_route_stops.py for the full set",
+                               EXCEL_MAX_DATA_ROWS, dropped_stops)
+    finally:
+        book.close()
+
+    return n_orders, n_stops
+
+
+def load_saved_orders(out_dir):
+    """Load every order_<n>.json in out_dir, sorted by order_number.
+
+    Used by --excel-from-dir so the workbook can cover the whole archive on
+    disk, not just the orders fetched in this run (which is nearly empty under
+    --incremental).
+    """
+    if not os.path.isdir(out_dir):
+        logger.error("Cannot build workbook: directory not found: %s", out_dir)
+        return []
+    names = []
+    with os.scandir(out_dir) as it:
+        for e in it:
+            m = re.match(r"order_(\d+)\.json$", e.name)
+            if m and e.is_file():
+                names.append((int(m.group(1)), e.name))
+    names.sort()
+
+    orders = []
+    failed = 0
+    for _, name in tqdm(names, desc="Reading saved orders", unit="order"):
+        try:
+            with open(os.path.join(out_dir, name), "r", encoding="utf-8") as fh:
+                orders.append(json.load(fh))
+        except (OSError, json.JSONDecodeError) as e:
+            failed += 1
+            logger.warning("Skipping %s: %s", name, e)
+    if failed:
+        logger.warning("%d saved order file(s) could not be read", failed)
+    logger.info("Loaded %d saved order(s) from %s", len(orders), out_dir)
+    return orders
 
 
 def order_status(o):
@@ -484,13 +785,29 @@ def main():
                         help="Directory for the per-order JSON files (default ./output/orders).")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip writing JSON files; only print the summary.")
-    parser.add_argument("--no-skip-terminal", action="store_true",
-                        help="Re-download terminal (completed/cancelled) orders even if "
-                             "already saved.")
+    parser.add_argument("--overwrite", "--no-skip-terminal", action="store_true",
+                        help="Re-save every fetched order, even one already on disk "
+                             "(default: an order whose file exists is never rewritten).")
+    parser.add_argument("--refresh-stale", action="store_true",
+                        help="Also re-save an already-saved order whose stored copy is "
+                             "not yet completed/cancelled, so a copy captured while the "
+                             "order was still in flight picks up its final state.")
     parser.add_argument("--incremental", action="store_true",
                         help="Fetch only orders newer than the highest already saved, "
                              "stopping pagination as soon as a known order is reached. "
                              "Assumes a complete prior download in --out-dir.")
+    parser.add_argument("--excel", default="output/orders.xlsx", metavar="PATH",
+                        help="Excel workbook to write: an 'orders' sheet (one row per order) "
+                             "and a 'route_stops' sheet (one row per stop) "
+                             "(default output/orders.xlsx).")
+    parser.add_argument("--no-excel", action="store_true",
+                        help="Skip writing the Excel workbook.")
+    parser.add_argument("--excel-from-dir", action="store_true",
+                        help="Build the workbook from every order_*.json in --out-dir (the "
+                             "whole archive) instead of only the orders fetched this run. "
+                             "Use this with --incremental.")
+    parser.add_argument("--no-excel-stops", action="store_true",
+                        help="Omit the route_stops sheet from the workbook.")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Log verbosity for the file, and console default (default INFO).")
@@ -510,7 +827,13 @@ def main():
     if missing:
         parser.error(f"Missing required credential(s): {', '.join(missing)}")
 
-    orders, total, saved, skipped = get_all_orders(
+    if args.excel_from_dir and args.no_excel:
+        parser.error("--excel-from-dir has no effect with --no-excel")
+    if args.excel_from_dir and args.no_save:
+        parser.error("--excel-from-dir reads the saved order files, so it can't be "
+                     "combined with --no-save")
+
+    orders, _total, saved, skipped = get_all_orders(
         cid=args.cid,
         key=args.key,
         customer_number=args.customer_number,
@@ -520,7 +843,8 @@ def main():
         max_pages=args.max_pages,
         out_dir=None if args.no_save else args.out_dir,
         page_delay=args.page_delay,
-        skip_terminal=not args.no_skip_terminal,
+        overwrite=args.overwrite,
+        refresh_stale=args.refresh_stale,
         max_retries=args.max_retries,
         retry_backoff=args.retry_backoff,
         incremental=args.incremental,
@@ -532,8 +856,18 @@ def main():
         summarize(orders)
 
     if not args.no_save:
-        logger.info("Saved %d order file(s) to %s/ (%d terminal order(s) skipped)",
+        logger.info("Wrote %d order file(s) to %s/ (%d already-saved order(s) skipped)",
                     saved, args.out_dir, skipped)
+
+    if not args.no_excel:
+        source = load_saved_orders(args.out_dir) if args.excel_from_dir else orders
+        if not source:
+            logger.warning("No orders to export — writing an empty workbook to %s",
+                           args.excel)
+        n_orders, n_stops = write_workbook(source, args.excel,
+                                           with_stops=not args.no_excel_stops)
+        logger.info("Excel workbook: %s (%d order row(s), %d stop row(s))",
+                    os.path.abspath(args.excel), n_orders, n_stops)
 
 
 if __name__ == "__main__":
