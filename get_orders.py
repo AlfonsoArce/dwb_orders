@@ -492,7 +492,7 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
             orders_stored += stored
             stops_stored += stops
 
-            bar.set_postfix(page=page_num, stored=orders_stored, saved=saved)
+            bar.set_postfix(page=page_num, stored=orders_stored, files=saved)
             logger.debug("page %d: got %d order(s) (stored %d, wrote %d file(s), "
                          "skipped %d); running total %d%s", page_num, len(orders),
                          stored, page_saved, page_skipped, len(all_orders),
@@ -771,11 +771,31 @@ def order_flags(o):
     return "read" if o.get("read") else "open"
 
 
-def summarize(orders):
+def summarize(result, with_json=True, sweep=None):
+    """Print what the run retrieved, stored and saved as three separate counts.
+
+    They are deliberately different numbers. An incremental run re-reads its
+    overlap pages every time, so an Order that has not changed is retrieved
+    again but neither stored nor written. Printing only the first number made
+    an idle run look like it was rewriting everything it saw.
+    """
+    orders = result.orders
+    on_account = f" (account holds {result.total:,})" if result.total else ""
+    print(f"\nRetrieved {len(orders):>7,}  order(s) from the API{on_account}")
+    print(f"Stored    {result.orders_stored:>7,}  order(s) new or updated, "
+          f"{result.stops_stored:,} route stop(s)")
+    if with_json:
+        print(f"Saved     {result.saved:>7,}  JSON file(s) written, "
+              f"{result.skipped:,} already on disk")
+    else:
+        print(f"Saved     {'-':>7}  JSON output disabled (--no-json)")
+    if sweep is not None:
+        print(f"Swept     {sweep.orders_stored:>7,}  in-flight Order(s) updated, "
+              f"{sweep.requested:,} re-requested")
+
     if not orders:
-        print("\nNo orders returned.")
         return
-    print(f"\nRetrieved {len(orders)} order(s). Sample:")
+    print("\nSample:")
     for o in orders[:5]:
         num = o.get("order_number", "?")
         cust = o.get("customer_number", "?")
@@ -891,6 +911,7 @@ def main():
     logger.info("Order store: %s", db.safe_dsn(db.resolve_dsn(args.dsn)))
 
     out_dir = None if args.no_json else args.out_dir
+    sweep = None
     try:
         result = get_all_orders(
             cid=args.cid,
@@ -913,7 +934,7 @@ def main():
         orders, saved, skipped = result.orders, result.saved, result.skipped
 
         if args.refresh_in_flight or args.sweep_preview:
-            sweep_in_flight(
+            sweep = sweep_in_flight(
                 conn, args.cid, args.key, args.customer_number, args.password,
                 timeout=args.timeout, limit=args.sweep_limit,
                 preview=args.sweep_preview, request_delay=args.page_delay,
@@ -926,7 +947,7 @@ def main():
     if args.raw:
         print(json.dumps(orders, indent=2, ensure_ascii=False))
     else:
-        summarize(orders)
+        summarize(result, with_json=not args.no_json, sweep=sweep)
 
     logger.info("Stored %d Order(s) and %d Route Stop(s) in the database",
                 result.orders_stored, result.stops_stored)
