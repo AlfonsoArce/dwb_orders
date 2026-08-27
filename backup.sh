@@ -62,7 +62,14 @@ cmd_restore() {
 
     docker exec "$CONTAINER" dropdb -U "$DB_USER" --if-exists --force "$target"
     docker exec "$CONTAINER" createdb -U "$DB_USER" "$target"
-    docker exec -i "$CONTAINER" pg_restore -U "$DB_USER" -d "$target" --no-owner < "$file"
+    # --no-privileges, not just --no-owner: since migration 0006 the dump
+    # carries GRANTs to dwb_viewer, and roles are cluster-level so no database
+    # dump creates them. Restoring onto a fresh cluster — the disaster this
+    # script exists for — would fail every one of those GRANTs, and pg_restore
+    # exiting non-zero under `set -e` would abort before the row counts below
+    # ever ran. Privileges come back by applying migrations, not from the dump.
+    docker exec -i "$CONTAINER" pg_restore -U "$DB_USER" -d "$target" \
+        --no-owner --no-privileges < "$file"
     docker exec "$CONTAINER" psql -U "$DB_USER" -d "$target" -c \
         "select 'orders' as table, count(*) from orders
          union all select 'route_stops', count(*) from route_stops"
