@@ -48,7 +48,7 @@ class TqdmLoggingHandler(logging.Handler):
         try:
             tqdm.write(self.format(record), file=sys.stderr)
             self.flush()
-        except Exception:  # pragma: no cover
+        except Exception:  # pragma: no cover - a handler must never crash the app  # noqa: BLE001
             self.handleError(record)
 
 
@@ -77,7 +77,7 @@ def setup_logging(level="INFO", log_file=None):
 def list_order_files(input_dir):
     """Return order JSON paths sorted numerically by order_number in the filename."""
     def key(name):
-        stem = name[:-5] if name.endswith(".json") else name
+        stem = name.removesuffix(".json")
         num = stem.rsplit("_", 1)[-1]
         try:
             return (0, int(num))

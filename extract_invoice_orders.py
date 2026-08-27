@@ -575,8 +575,8 @@ def main(argv=None):
     for vendor, pdf_path in tqdm(pdfs, desc="invoices"):
         try:
             pi = parse_invoice(pdf_path, vendor)
-        except Exception as exc:
-            LOG.exception("failed to parse %s: %s", pdf_path, exc)
+        except Exception:
+            LOG.exception("failed to parse %s", pdf_path)
             continue
         parsed.append(pi)
         n_orders += len(pi.orders)

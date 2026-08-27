@@ -43,7 +43,8 @@ except ImportError:  # pragma: no cover
     normalize_address_record = None
 
 try:
-    from rapidfuzz import fuzz, process as rf_process
+    from rapidfuzz import fuzz
+    from rapidfuzz import process as rf_process
 except ImportError:  # pragma: no cover
     fuzz = None
     rf_process = None
@@ -108,7 +109,7 @@ def setup_logging(level, log_file):
         def emit(self, record):
             try:
                 tqdm.write(self.format(record), file=sys.stderr)
-            except Exception:
+            except Exception:  # pragma: no cover - a handler must never crash the app  # noqa: BLE001
                 self.handleError(record)
 
     console = TqdmHandler()
@@ -126,7 +127,7 @@ def setup_logging(level, log_file):
 
 def list_order_files(input_dir):
     def key(name):
-        stem = name[:-5] if name.endswith(".json") else name
+        stem = name.removesuffix(".json")
         num = stem.rsplit("_", 1)[-1]
         try:
             return (0, int(num))
@@ -284,7 +285,7 @@ def normalize_stop(stop):
             state = (result.get("state") or "").upper()
             zip_full = (result.get("postal_code") or "").upper()
             parse_ok = True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - a bad address must not stop the run
             parse_err = type(e).__name__ + ": " + str(e)[:200]
 
     if not parse_ok:
@@ -328,7 +329,8 @@ def parse_order_time(s):
     if not s:
         return None
     try:
-        return datetime.strptime(s, ORDER_TIME_FMT)
+        # Naive on purpose: the API sends no offset at all (ADR-0001).
+        return datetime.strptime(s, ORDER_TIME_FMT)  # noqa: DTZ007
     except (ValueError, TypeError):
         return None
 
