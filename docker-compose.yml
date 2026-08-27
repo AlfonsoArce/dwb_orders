@@ -1,17 +1,26 @@
-# Postgres for the Order store, plus a browser client.
+# Postgres for the Order store, a browser client, and the Orders viewer.
 #
-# Both services bind to 127.0.0.1 only: nothing here is reachable from the
+# Every service binds to 127.0.0.1 only: nothing here is reachable from the
 # network. The published Postgres port is 5434 because 5432 and 5433 are
 # already taken by the TMS and billing databases on this machine.
+#
+# Adminer is the write-capable tool here, and the viewer is not a security
+# boundary while it is running. Adminer connects as `dwb`, which owns every
+# table and is one click from destroying the store; the viewer connects as
+# `dwb_viewer`, which holds SELECT and nothing else. Both statements are true
+# at once. "Read-only viewer" is a property of the viewer, not of this machine.
 #
 # Database storage is a named Docker volume, never a bind mount. This
 # repository lives inside iCloud Drive, and a Postgres data directory under a
 # sync daemon gets corrupted.
 #
 # Settings come from .env (see .env.example):
-#   POSTGRES_PASSWORD  the database password, the one place it is written
-#   DWB_PG_PORT        host port for Postgres      (default 5434)
-#   DWB_ADMINER_PORT   host port for Adminer       (default 8081)
+#   POSTGRES_PASSWORD     the database password, the one place it is written
+#   DWB_VIEWER_PASSWORD   the viewer role's password — a *different* secret,
+#                         set on the role by hand once (see .env.example)
+#   DWB_PG_PORT           host port for Postgres    (default 5434)
+#   DWB_ADMINER_PORT      host port for Adminer     (default 8081)
+#   DWB_VIEWER_PORT       host port for the viewer  (default 8082)
 
 services:
   db:
@@ -45,6 +54,37 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dwb-orders-viewer
+    container_name: dwb-orders-viewer
+    restart: unless-stopped
+    environment:
+      # The service name and the *internal* port: 127.0.0.1:5434 is the
+      # published address on the host, and means nothing in here. This is why
+      # the viewer's connection string is its own setting and not DWB_DSN.
+      DWB_VIEWER_DSN: postgresql://dwb_viewer@db:5432/dwb_orders
+      # Never POSTGRES_PASSWORD. A read-only account authenticating with the
+      # owning account's secret is not a second account.
+      DWB_VIEWER_PASSWORD: ${DWB_VIEWER_PASSWORD:?set DWB_VIEWER_PASSWORD in .env, and on the role — see .env.example}
+    ports:
+      - "127.0.0.1:${DWB_VIEWER_PORT:-8082}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # The endpoint answers 200 even when the database is down — that is its
+      # job — so this reports whether the *viewer* is working, which is what
+      # `docker compose ps` should tell you. Written in Python because the
+      # image has no curl, and needs none.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   pgdata:

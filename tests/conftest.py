@@ -114,6 +114,25 @@ def empty_database():
 
 
 @pytest.fixture
+def viewer(database, tmp_path):
+    """The Orders viewer, driven over HTTP against this test's database.
+
+    The connection string is the only substitution: routing, querying and
+    serialisation are all the code that runs in the container. Imported here
+    rather than at module scope so the rest of the suite does not need the
+    web dependencies present to collect.
+    """
+    from fastapi.testclient import TestClient
+
+    from dwb.viewer import create_app
+
+    # Pointed at a directory that does not exist: whether somebody has built
+    # the frontend on this machine must not change what these tests see.
+    with TestClient(create_app(dsn=database, assets=str(tmp_path / "unbuilt"))) as client:
+        yield client
+
+
+@pytest.fixture
 def run_cli():
     """Run one of the repository's command-line entry points.
 

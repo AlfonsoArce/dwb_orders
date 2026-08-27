@@ -1,0 +1,124 @@
+/* One screen, read on a laptop in an office. Nothing here is a design system;
+   it is enough type and spacing to make four figures legible at a glance. */
+
+:root {
+  --ink: #12171d;
+  --quiet: #5c6874;
+  --line: #dfe4ea;
+  --paper: #f7f8fa;
+  --card: #ffffff;
+  --alarm: #a3261c;
+  --alarm-paper: #fdf0ee;
+
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8ecf1;
+    --quiet: #9aa6b2;
+    --line: #2a323b;
+    --paper: #12171d;
+    --card: #1a2029;
+    --alarm: #ff9c8f;
+    --alarm-paper: #2a1a18;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+}
+
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+}
+
+header {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
+  margin-bottom: 2rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.read-only {
+  margin: 0.35rem 0 0;
+  color: var(--quiet);
+  font-size: 0.875rem;
+}
+
+.quiet {
+  color: var(--quiet);
+}
+
+.figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 1rem;
+}
+
+.figure {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 1.1rem 1.25rem;
+}
+
+.figure-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--quiet);
+}
+
+.figure-value {
+  font-size: 2rem;
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.35rem;
+  line-height: 1.1;
+}
+
+.figure-value-long {
+  font-size: 1.25rem;
+  line-height: 1.35;
+}
+
+.figure-note {
+  margin-top: 0.4rem;
+  font-size: 0.8125rem;
+  color: var(--quiet);
+}
+
+.problem {
+  background: var(--alarm-paper);
+  border: 1px solid var(--alarm);
+  border-radius: 0.5rem;
+  padding: 1.25rem;
+}
+
+.problem h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  color: var(--alarm);
+}
+
+.problem pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.8125rem;
+  color: var(--ink);
+}

@@ -17,11 +17,20 @@ class DatabaseUnavailable(Exception):
     """The database could not be reached, with advice on the connection tried."""
 
 
-def connect(dsn=None, autocommit=False, connect_timeout=10):
+# Distinguishes "the caller said nothing about a password" from "the caller
+# said there is no password". Only the first should reach for the admin one.
+FROM_ENVIRONMENT = object()
+
+
+def connect(dsn=None, autocommit=False, connect_timeout=10,
+            password=FROM_ENVIRONMENT):
     """Open a connection, or raise DatabaseUnavailable with a usable message.
 
     The password comes from POSTGRES_PASSWORD unless the connection string
-    already carries one of its own.
+    already carries one, or the caller passes one of its own. A caller
+    connecting as anything other than the owning role must pass its own
+    password — POSTGRES_PASSWORD is the admin account's, and silently
+    borrowing it is how a read-only account stops being a separate account.
     """
     dsn = resolve_dsn(dsn)
     kwargs = {"autocommit": autocommit, "connect_timeout": connect_timeout}
@@ -30,7 +39,8 @@ def connect(dsn=None, autocommit=False, connect_timeout=10):
     except psycopg.ProgrammingError as e:
         raise DatabaseUnavailable(f"Not a usable connection string: {e}")
     if not parsed.get("password"):
-        password = resolve_password()
+        if password is FROM_ENVIRONMENT:
+            password = resolve_password()
         if password:
             kwargs["password"] = password
     try:

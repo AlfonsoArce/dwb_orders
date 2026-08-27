@@ -1,0 +1,35 @@
+# The build context is an allowlist: everything is excluded, and only what the
+# image needs is re-admitted below.
+#
+# This is not tidiness. The working tree holds fetched Orders and HawkExpress
+# invoice PDFs — customer freight records — alongside virtual environments,
+# database dumps and logs. A denylist is one forgotten directory away from
+# baking those into an image layer, permanently and irretrievably. With this
+# shape, a directory added later is excluded until somebody deliberately
+# admits it.
+*
+
+# The service itself.
+!dwb
+!dwb/**
+!viewer.py
+
+# Its Python dependencies, installed from the lockfile.
+!pyproject.toml
+!uv.lock
+
+# Its frontend, built in the Node stage from the lockfile.
+!frontend
+!frontend/**
+
+# ...but never the frontend's installed tree or a build made on the host: both
+# are large, both are platform-specific, and the image builds its own.
+frontend/node_modules
+frontend/node_modules/**
+frontend/dist
+frontend/dist/**
+
+# Nor anything Python leaves lying around inside an admitted directory.
+**/__pycache__
+**/__pycache__/**
+**/*.py[cod]

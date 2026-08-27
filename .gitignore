@@ -22,6 +22,14 @@ output/**
 logs/
 *.log
 
+# Node - the Orders viewer's frontend (see ADR-0006).
+#
+# The lockfile is committed; the tree it installs and the assets it builds are
+# not. The Node version is pinned in .nvmrc and mirrored in the Dockerfile.
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+
 # Python
 __pycache__/
 *.py[cod]
