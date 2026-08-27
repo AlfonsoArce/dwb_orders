@@ -41,6 +41,10 @@ dist/
 # Claude Code - share the slash commands, keep per-machine settings local
 .claude/settings.local.json
 
+# draw.io scratch files, left next to the diagram it is editing
+*.drawio.bkp
+*.drawio.dtmp
+
 # OS / editor
 .DS_Store
 Thumbs.db
