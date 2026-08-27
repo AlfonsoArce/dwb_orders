@@ -155,6 +155,10 @@ def one(conn, sql, params=None):
 # Shaped like the payloads Digital Waybill actually returns: naive timestamps
 # in three different formats, prices as strings, empty strings where a value
 # is absent, and a First Stop carrying only Location fields.
+#
+# Contact names and phone numbers are invented (555-01xx is the range reserved
+# for fiction). Never paste a live Order in here: this file is committed, and
+# the archive it would come from is not.
 # ---------------------------------------------------------------------------
 
 FIRST_STOP = {
@@ -165,7 +169,7 @@ FIRST_STOP = {
     "state": "FL",
     "postal_code": "33315",
     "country": "United States",
-    "contact": {"name": "", "phone": "954-359-0829"},
+    "contact": {"name": "", "phone": "954-555-0142"},
 }
 
 FINAL_STOP = {
@@ -176,7 +180,7 @@ FINAL_STOP = {
     "state": "FL",
     "postal_code": "33312",
     "country": "United States",
-    "contact": {"name": "MATTHEW COHEN", "phone": "954-302-3922"},
+    "contact": {"name": "DANA RIVERA", "phone": "954-555-0168"},
     "paper_waybill": "",
     "special_instructions": "",
     "return_add": "0",
@@ -189,7 +193,7 @@ FINAL_STOP = {
     "driver_number": "ENGE",
     "dispatch_message": "UNITED AIRLINES CARGO FLL. To: LUFTHANSA TECHNIK. SRV: VAN. ",
     "notes": "",
-    "signature_contact": "BRENT JERVEY ",
+    "signature_contact": "CHRIS MORGAN ",
     "reference": "58225052846",
     "signature": "",
     "fuel_surcharge": "",
