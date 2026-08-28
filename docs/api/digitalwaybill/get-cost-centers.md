@@ -89,7 +89,7 @@ Matches the official `CostCenter` type exactly — the same object shape as the 
 | `contact` | string | Contact person name; often empty or a placeholder (`.`). |
 | `address`, `suite`, `city`, `state`, `postal_code`, `country` | string | Structured address. |
 | `email` | string | Free-form and unvalidated — observed values include `.` and street-address text alongside real addresses. |
-| `phone`, `fax` | string | Free-form; formats vary, including annotations like `305-406-0057//305-890-4908 CEL`. Often empty. |
+| `phone`, `fax` | string | Free-form; formats vary, including two numbers in one field with an annotation, like `305-555-0157//305-555-0108 CEL`. Often empty. |
 
 Records carry **no parent-customer field**. To find a cost center's customer, either filter this endpoint with `customer_number`/`customer_name`, or match the nested `cost_centers[].id` in [get-customers.md](get-customers.md).
 

@@ -112,7 +112,7 @@ Matches the official `Customer` type exactly — all fields are strings except `
 | `contact` | string | Contact person name; often empty. |
 | `address`, `suite`, `city`, `state`, `postal_code`, `country` | string | Structured address. |
 | `email` | string | May contain **multiple comma-separated addresses** in one string. |
-| `phone`, `fax` | string | Free-form; formats vary (`4808674404`, `954-6218658`, `888-613-4143 ext. 701`). Often empty. |
+| `phone`, `fax` | string | Free-form; formats vary — no separators, partial separators, and extensions all appear (`9545550142`, `954-5550168`, `888-555-0114 ext. 701`). Often empty. |
 | `cost_centers` | array | `CostCenter` objects (same shape as [get-cost-centers.md](get-cost-centers.md)) under the customer. Each has its **own `id`** plus the same contact/address fields (no `customer_number`). In observed data most customers have exactly one cost center duplicating the customer's details. |
 
 > Official caveat: the gateway may return extra fields not in the published docs (deprecated or not yet provisioned); relying on them is unsupported.
