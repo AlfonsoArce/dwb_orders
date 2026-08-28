@@ -1,8 +1,13 @@
 # Postgres for the Order store, a browser client, and the Orders viewer.
 #
-# Every service binds to 127.0.0.1 only: nothing here is reachable from the
-# network. The published Postgres port is 5434 because 5432 and 5433 are
-# already taken by the TMS and billing databases on this machine.
+# Adminer and the viewer bind to 127.0.0.1 only. Postgres is published on all
+# interfaces (DWB_PG_BIND, default 0.0.0.0) so other machines can reach the
+# Order store; set DWB_PG_BIND=127.0.0.1 in .env to pull it back to this host
+# alone. Anyone who can route to this machine can then attempt authentication,
+# so POSTGRES_PASSWORD is the only thing between the network and real customer
+# data — keep it long, and keep the port closed at the firewall to everything
+# but the hosts that need it. The published Postgres port is 5434 because 5432
+# and 5433 are already taken by the TMS and billing databases on this machine.
 #
 # Adminer is the write-capable tool here, and the viewer is not a security
 # boundary while it is running. Adminer connects as `dwb`, which owns every
@@ -19,6 +24,8 @@
 #   DWB_VIEWER_PASSWORD   the viewer role's password — a *different* secret,
 #                         set on the role by hand once (see .env.example)
 #   DWB_PG_PORT           host port for Postgres    (default 5434)
+#   DWB_PG_BIND           host address Postgres is published on (default
+#                         0.0.0.0 — every interface; use 127.0.0.1 for local)
 #   DWB_ADMINER_PORT      host port for Adminer     (default 8081)
 #   DWB_VIEWER_PORT       host port for the viewer  (default 8082)
 
@@ -32,7 +39,10 @@ services:
       POSTGRES_USER: dwb
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "127.0.0.1:${DWB_PG_PORT:-5434}:5432"
+      # Reachable from other machines, not just this one. The container has
+      # always listened on *, and pg_hba requires scram-sha-256 for anything
+      # that is not container-local, so this line is the whole exposure.
+      - "${DWB_PG_BIND:-0.0.0.0}:${DWB_PG_PORT:-5434}:5432"
     volumes:
       # Postgres 18 wants the whole /var/lib/postgresql, not just data/, so
       # that a future pg_upgrade --link stays inside one mount point.
