@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Parse the PriceBreakdown column of a History export and validate it.
+
+Every row's PriceBreakdown is parsed into individual charges (see
+dwb/price_breakdown.py for the format), and the parse is considered valid
+when the charge amounts sum to the row's FinalPrice. Prints the tally and
+any rows that fail, so a format drift in a future export is visible
+immediately.
+
+With --text, skips the workbook entirely: parses one PriceBreakdown string
+and prints the breakdown as JSON, for callers that are not Python.
+
+    python3 parse_price_breakdown.py
+    python3 parse_price_breakdown.py --input input/History-2025-04-12.xlsx --show-failures 20
+    python3 parse_price_breakdown.py --text 'Van: Miami to Miami~51~565~5AP~6~6245465'
+    echo 'Van: ...~51~565~5AP~6~6245465' | python3 parse_price_breakdown.py --text - --final-price 65
+"""
+
+import argparse
+import json
+import sys
+
+import openpyxl
+
+from dwb.price_breakdown import parse
+
+
+def validate_workbook(path):
+    """Yield (row_id, breakdown, final_price, matches) per data row."""
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook[workbook.sheetnames[0]]
+        rows = sheet.iter_rows(values_only=True)
+        header = {name: i for i, name in enumerate(next(rows))}
+        for column in ("ID", "PriceBreakdown", "FinalPrice"):
+            if column not in header:
+                raise SystemExit(f"{path}: missing column {column!r}")
+        for row in rows:
+            breakdown = parse(row[header["PriceBreakdown"]])
+            final_price = row[header["FinalPrice"]]
+            yield (
+                row[header["ID"]],
+                breakdown,
+                final_price,
+                breakdown.matches(final_price),
+            )
+    finally:
+        workbook.close()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Parse and validate the PriceBreakdown column of a History export."
+    )
+    parser.add_argument(
+        "--input",
+        default="input/History-2025-04-12.xlsx",
+        help="Path to the History .xlsx export",
+    )
+    parser.add_argument(
+        "--show-failures",
+        type=int,
+        default=10,
+        metavar="N",
+        help="How many failing rows to print in full (default 10)",
+    )
+    parser.add_argument(
+        "--text",
+        metavar="BREAKDOWN",
+        help="Parse this one PriceBreakdown string and print JSON"
+        " instead of validating the workbook ('-' reads stdin)",
+    )
+    parser.add_argument(
+        "--final-price",
+        metavar="PRICE",
+        help="With --text: also check that the charges sum to this price",
+    )
+    args = parser.parse_args(argv)
+
+    if args.text is not None:
+        text = sys.stdin.read() if args.text == "-" else args.text
+        result = parse(text.strip("\n")).as_dict(args.final_price)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("matches_final_price", True) else 1
+
+    total = valid = 0
+    failures = []
+    for row_id, breakdown, final_price, matches in validate_workbook(args.input):
+        total += 1
+        if matches:
+            valid += 1
+        else:
+            failures.append((row_id, breakdown, final_price))
+
+    print(f"{args.input}: {total} rows, {valid} valid, {len(failures)} failed")
+    for row_id, breakdown, final_price in failures[: args.show_failures]:
+        print(f"  ID {row_id}: FinalPrice={final_price} sum={breakdown.total}")
+        for charge in breakdown.charges:
+            print(
+                f"    {charge.description!r}: {charge.quantity} x {charge.rate}"
+                f" = {charge.amount} [{charge.code}]"
+            )
+    if len(failures) > args.show_failures:
+        print(f"  … and {len(failures) - args.show_failures} more")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -10,6 +10,7 @@ dependencies = [
     # The Orders viewer: FastAPI serves its API and its built assets,
     # uvicorn runs it. Nothing else here is a web application.
     "fastapi>=0.115",
+    "openpyxl>=3.1.5",
     "pdfplumber>=0.11.8",
     "psycopg[binary]>=3.2",
     "rapidfuzz>=3.13.0",
