@@ -109,7 +109,8 @@ def setup_logging(level, log_file):
         def emit(self, record):
             try:
                 tqdm.write(self.format(record), file=sys.stderr)
-            except Exception:  # pragma: no cover - a handler must never crash the app  # noqa: BLE001
+            # A handler must never crash the application it is logging for.
+            except Exception:  # noqa: BLE001  # pragma: no cover
                 self.handleError(record)
 
     console = TqdmHandler()
