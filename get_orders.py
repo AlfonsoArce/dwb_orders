@@ -76,6 +76,7 @@ class APIRequestError(Exception):
     caller may stop gracefully and keep whatever was already fetched.
     """
 
+
 # Redact secrets (key=..., password=...) from any text before logging it.
 _SECRET_RE = re.compile(r"((?:key|password)=)[^&\s]+", re.IGNORECASE)
 
@@ -92,7 +93,8 @@ class TqdmLoggingHandler(logging.Handler):
         try:
             tqdm.write(self.format(record), file=sys.stderr)
             self.flush()
-        except Exception:  # pragma: no cover - a handler must never crash the app  # noqa: BLE001
+        # A handler must never crash the application it is logging for.
+        except Exception:  # noqa: BLE001  # pragma: no cover
             self.handleError(record)
 
 
@@ -111,7 +113,9 @@ def setup_logging(level="INFO", log_file=None, console_level=None):
     logger.handlers.clear()
     logger.propagate = False
 
-    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"
+    )
 
     console = TqdmLoggingHandler()
     console.setLevel(console_level)
@@ -180,29 +184,57 @@ def request_json(url, timeout, max_retries=5, backoff=2.0):
         except urllib.error.HTTPError as e:
             detail = decode_body(e.read(), getattr(e, "headers", None))
             if e.code in RETRYABLE_STATUS and attempt <= max_retries:
-                wait = min(_retry_after_seconds(getattr(e, "headers", None),
-                                                backoff * 2 ** (attempt - 1)), MAX_BACKOFF)
-                logger.warning("HTTP %s %s for %s — retrying in %.1fs (attempt %d/%d)",
-                               e.code, e.reason, safe_url, wait, attempt, max_retries + 1)
+                wait = min(
+                    _retry_after_seconds(
+                        getattr(e, "headers", None), backoff * 2 ** (attempt - 1)
+                    ),
+                    MAX_BACKOFF,
+                )
+                logger.warning(
+                    "HTTP %s %s for %s — retrying in %.1fs (attempt %d/%d)",
+                    e.code,
+                    e.reason,
+                    safe_url,
+                    wait,
+                    attempt,
+                    max_retries + 1,
+                )
                 time.sleep(wait)
                 continue
             if e.code in RETRYABLE_STATUS:
-                logger.error("HTTP %s %s for %s — giving up after %d attempt(s)\n%s",
-                             e.code, e.reason, safe_url, attempt, redact(detail))
+                logger.error(
+                    "HTTP %s %s for %s — giving up after %d attempt(s)\n%s",
+                    e.code,
+                    e.reason,
+                    safe_url,
+                    attempt,
+                    redact(detail),
+                )
                 raise APIRequestError(f"HTTP {e.code} after {attempt} attempts")
-            logger.error("HTTP %s %s for %s\n%s", e.code, e.reason, safe_url, redact(detail))
+            logger.error(
+                "HTTP %s %s for %s\n%s", e.code, e.reason, safe_url, redact(detail)
+            )
             raise SystemExit(1)
         except (urllib.error.URLError, TimeoutError) as e:
             reason = getattr(e, "reason", e)
             if attempt <= max_retries:
                 wait = min(backoff * 2 ** (attempt - 1), MAX_BACKOFF)
-                logger.warning("Connection error for %s: %s — retrying in %.1fs "
-                               "(attempt %d/%d)", safe_url, reason, wait,
-                               attempt, max_retries + 1)
+                logger.warning(
+                    "Connection error for %s: %s — retrying in %.1fs (attempt %d/%d)",
+                    safe_url,
+                    reason,
+                    wait,
+                    attempt,
+                    max_retries + 1,
+                )
                 time.sleep(wait)
                 continue
-            logger.error("Connection error for %s: %s — giving up after %d attempt(s)",
-                         safe_url, reason, attempt)
+            logger.error(
+                "Connection error for %s: %s — giving up after %d attempt(s)",
+                safe_url,
+                reason,
+                attempt,
+            )
             raise APIRequestError(f"Connection error after {attempt} attempts")
         except json.JSONDecodeError as e:
             logger.error("Response was not valid JSON from %s: %s", safe_url, e)
@@ -211,8 +243,12 @@ def request_json(url, timeout, max_retries=5, backoff=2.0):
 
 def _creds(key, customer_number, password, extra=None):
     """Build the common credential query params, dropping any that are None."""
-    params = {"v": API_VERSION, "key": key,
-              "customer_number": customer_number, "password": password}
+    params = {
+        "v": API_VERSION,
+        "key": key,
+        "customer_number": customer_number,
+        "password": password,
+    }
     if extra:
         params.update(extra)
     return {k: v for k, v in params.items() if v is not None}
@@ -225,8 +261,16 @@ def fetch_page(cid, params, timeout, max_retries=5, backoff=2.0):
     return request_json(url, timeout, max_retries=max_retries, backoff=backoff)
 
 
-def fetch_order(cid, order_number, key, customer_number=None, password=None,
-                timeout=30.0, max_retries=5, backoff=2.0):
+def fetch_order(
+    cid,
+    order_number,
+    key,
+    customer_number=None,
+    password=None,
+    timeout=30.0,
+    max_retries=5,
+    backoff=2.0,
+):
     """Fetch one order's full detail via GET /{CID}/orders.json/{order_number}.
 
     Returns the single order dict (unwrapped from the {status, error, body}
@@ -318,10 +362,12 @@ def save_order(order, out_dir):
 
 
 FetchResult = collections.namedtuple(
-    "FetchResult", "orders total saved skipped orders_stored stops_stored")
+    "FetchResult", "orders total saved skipped orders_stored stops_stored"
+)
 
 SweepResult = collections.namedtuple(
-    "SweepResult", "considered requested orders_stored stops_stored")
+    "SweepResult", "considered requested orders_stored stops_stored"
+)
 
 
 def sql_watermark(conn, source_key=ingest.DEFAULT_SOURCE):
@@ -332,8 +378,9 @@ def sql_watermark(conn, source_key=ingest.DEFAULT_SOURCE):
     sync daemon is halfway through re-enumerating the folder.
     """
     with conn.cursor() as cur:
-        cur.execute("select max(order_number) from orders where source_key = %s",
-                    (source_key,))
+        cur.execute(
+            "select max(order_number) from orders where source_key = %s", (source_key,)
+        )
         return cur.fetchone()[0]
 
 
@@ -344,9 +391,12 @@ def in_flight_order_numbers(conn, limit, source_key=ingest.DEFAULT_SOURCE):
     so an unbounded sweep of a large backlog could run for hours.
     """
     with conn.cursor() as cur:
-        cur.execute("select order_number from orders "
-                    "where source_key = %s and not is_terminal "
-                    "order by order_number desc limit %s", (source_key, limit))
+        cur.execute(
+            "select order_number from orders "
+            "where source_key = %s and not is_terminal "
+            "order by order_number desc limit %s",
+            (source_key, limit),
+        )
         return [row[0] for row in cur.fetchall()]
 
 
@@ -357,16 +407,32 @@ def _store(conn, orders, source_key):
     result = ingest.ingest_orders(conn, orders, source_key)
     conn.commit()
     if result.orders_unusable:
-        logger.warning("%d order(s) had no usable order_number and were not "
-                       "stored", result.orders_unusable)
+        logger.warning(
+            "%d order(s) had no usable order_number and were not stored",
+            result.orders_unusable,
+        )
     return result.orders_written, result.stops_written
 
 
-def get_all_orders(cid, key, customer_number, password, page_size, timeout,
-                   max_pages, out_dir=None, page_delay=0.5, overwrite=False,
-                   refresh_stale=False, max_retries=5, retry_backoff=2.0,
-                   incremental=False, conn=None, overlap_pages=0,
-                   source_key=ingest.DEFAULT_SOURCE):
+def get_all_orders(
+    cid,
+    key,
+    customer_number,
+    password,
+    page_size,
+    timeout,
+    max_pages,
+    out_dir=None,
+    page_delay=0.5,
+    overwrite=False,
+    refresh_stale=False,
+    max_retries=5,
+    retry_backoff=2.0,
+    incremental=False,
+    conn=None,
+    overlap_pages=0,
+    source_key=ingest.DEFAULT_SOURCE,
+):
     """Page through /orders.json, storing each Order and saving it as a file.
 
     Every Order retrieved is written to the database (conn), one commit per
@@ -393,20 +459,33 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
 
     watermark = sql_watermark(conn, source_key) if (incremental and conn) else None
 
-    policy = ("overwrite everything" if overwrite else
-              "skip already-saved orders" + (", refresh non-terminal copies"
-                                             if refresh_stale else ""))
-    logger.info("Fetching orders: page_size=%d, max_pages=%d, page_delay=%.2fs, "
-                "policy=%s, max_retries=%d, out_dir=%s", page_size, max_pages,
-                page_delay, policy, max_retries,
-                out_dir if out_dir is not None else "(no files)")
+    policy = (
+        "overwrite everything"
+        if overwrite
+        else "skip already-saved orders"
+        + (", refresh non-terminal copies" if refresh_stale else "")
+    )
+    logger.info(
+        "Fetching orders: page_size=%d, max_pages=%d, page_delay=%.2fs, "
+        "policy=%s, max_retries=%d, out_dir=%s",
+        page_size,
+        max_pages,
+        page_delay,
+        policy,
+        max_retries,
+        out_dir if out_dir is not None else "(no files)",
+    )
     if incremental:
         if watermark is None:
             logger.info("Incremental mode: no Orders stored yet — doing a full fetch.")
         else:
-            logger.info("Incremental mode: resuming after Order #%d, after "
-                        "re-requesting the first %d page(s) to catch Orders "
-                        "whose status has moved on.", watermark, overlap_pages)
+            logger.info(
+                "Incremental mode: resuming after Order #%d, after "
+                "re-requesting the first %d page(s) to catch Orders "
+                "whose status has moved on.",
+                watermark,
+                overlap_pages,
+            )
 
     # Until the first response tells us the real count, bound the bar by what
     # the page settings could return; we shrink it to the true total below.
@@ -423,18 +502,24 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                 "page_num": page_num,
             }
             try:
-                data, _ = fetch_page(cid, params, timeout,
-                                     max_retries=max_retries, backoff=retry_backoff)
+                data, _ = fetch_page(
+                    cid, params, timeout, max_retries=max_retries, backoff=retry_backoff
+                )
             except APIRequestError as e:
-                logger.error("Stopping at page %d after repeated failures (%s). "
-                             "Keeping %d order(s) already fetched; rerun to resume.",
-                             page_num, e, len(all_orders))
+                logger.error(
+                    "Stopping at page %d after repeated failures (%s). "
+                    "Keeping %d order(s) already fetched; rerun to resume.",
+                    page_num,
+                    e,
+                    len(all_orders),
+                )
                 break
 
             # The API wraps results in an envelope: {status, error, body:{...}}.
             if isinstance(data, dict) and data.get("error"):
-                logger.error("API error (status %s): %s",
-                             data.get("status"), data["error"])
+                logger.error(
+                    "API error (status %s): %s", data.get("status"), data["error"]
+                )
                 raise SystemExit(1)
             body = data.get("body", data) if isinstance(data, dict) else {}
 
@@ -462,8 +547,12 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                 # the watermark means everything left is already stored.
                 oid = order_number_of(o)
                 if watermark_applies and oid is not None and oid <= watermark:
-                    logger.debug("reached known order #%s (<= watermark #%d); "
-                                 "stopping pagination", oid, watermark)
+                    logger.debug(
+                        "reached known order #%s (<= watermark #%d); "
+                        "stopping pagination",
+                        oid,
+                        watermark,
+                    )
                     reached_known = True
                     break
 
@@ -472,19 +561,28 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
                 if out_dir is not None:
                     path = order_path(o, out_dir)
                     known = os.path.exists(path)
-                    do_save, reason = save_decision(path, known, overwrite=overwrite,
-                                                    refresh_stale=refresh_stale)
+                    do_save, reason = save_decision(
+                        path, known, overwrite=overwrite, refresh_stale=refresh_stale
+                    )
                     if do_save:
                         save_order(o, out_dir)
                         saved += 1
                         page_saved += 1
-                        logger.debug("save order %s (%s): status=%r", ident, reason,
-                                     o.get("status"))
+                        logger.debug(
+                            "save order %s (%s): status=%r",
+                            ident,
+                            reason,
+                            o.get("status"),
+                        )
                     else:
                         skipped += 1
                         page_skipped += 1
-                        logger.debug("skip order %s (%s): status=%r", ident, reason,
-                                     o.get("status"))
+                        logger.debug(
+                            "skip order %s (%s): status=%r",
+                            ident,
+                            reason,
+                            o.get("status"),
+                        )
                 all_orders.append(o)
                 bar.update(1)
 
@@ -493,15 +591,26 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
             stops_stored += stops
 
             bar.set_postfix(page=page_num, stored=orders_stored, files=saved)
-            logger.debug("page %d: got %d order(s) (stored %d, wrote %d file(s), "
-                         "skipped %d); running total %d%s", page_num, len(orders),
-                         stored, page_saved, page_skipped, len(all_orders),
-                         f" of {total}" if total is not None else "")
+            logger.debug(
+                "page %d: got %d order(s) (stored %d, wrote %d file(s), "
+                "skipped %d); running total %d%s",
+                page_num,
+                len(orders),
+                stored,
+                page_saved,
+                page_skipped,
+                len(all_orders),
+                f" of {total}" if total is not None else "",
+            )
 
             # Incremental: we've crossed into already-stored territory.
             if reached_known:
-                logger.info("Reached already-stored Orders at page %d; stopping. "
-                            "Fetched %d order(s).", page_num, len(all_orders))
+                logger.info(
+                    "Reached already-stored Orders at page %d; stopping. "
+                    "Fetched %d order(s).",
+                    page_num,
+                    len(all_orders),
+                )
                 break
 
             # Stop when this page wasn't full, or we've reached the reported count.
@@ -515,17 +624,34 @@ def get_all_orders(cid, key, customer_number, password, page_size, timeout,
     finally:
         bar.close()
 
-    logger.info("Done: retrieved %d order(s); stored %d, wrote %d file(s), "
-                "skipped %d (already saved)", len(all_orders), orders_stored,
-                saved, skipped)
+    logger.info(
+        "Done: retrieved %d order(s); stored %d, wrote %d file(s), "
+        "skipped %d (already saved)",
+        len(all_orders),
+        orders_stored,
+        saved,
+        skipped,
+    )
     return FetchResult(all_orders, total, saved, skipped, orders_stored, stops_stored)
 
 
-def sweep_in_flight(conn, cid, key, customer_number=None, password=None,
-                    timeout=30.0, limit=200, preview=False, request_delay=1.0,
-                    max_retries=5, retry_backoff=2.0, out_dir=None,
-                    overwrite=False, refresh_stale=False,
-                    source_key=ingest.DEFAULT_SOURCE):
+def sweep_in_flight(
+    conn,
+    cid,
+    key,
+    customer_number=None,
+    password=None,
+    timeout=30.0,
+    limit=200,
+    preview=False,
+    request_delay=1.0,
+    max_retries=5,
+    retry_backoff=2.0,
+    out_dir=None,
+    overwrite=False,
+    refresh_stale=False,
+    source_key=ingest.DEFAULT_SOURCE,
+):
     """Re-request the Orders that are still In Flight, one at a time.
 
     Paging overlap catches almost all of them far more cheaply — fifty Orders
@@ -538,9 +664,12 @@ def sweep_in_flight(conn, cid, key, customer_number=None, password=None,
         return SweepResult(0, 0, 0, 0)
 
     if preview:
-        logger.info("Would re-request %d In Flight Order(s): %s", len(numbers),
-                    ", ".join(f"#{n}" for n in numbers[:20])
-                    + (" ..." if len(numbers) > 20 else ""))
+        logger.info(
+            "Would re-request %d In Flight Order(s): %s",
+            len(numbers),
+            ", ".join(f"#{n}" for n in numbers[:20])
+            + (" ..." if len(numbers) > 20 else ""),
+        )
         return SweepResult(len(numbers), 0, 0, 0)
 
     logger.info("Sweeping %d In Flight Order(s), one request each.", len(numbers))
@@ -549,25 +678,39 @@ def sweep_in_flight(conn, cid, key, customer_number=None, password=None,
     try:
         for number in numbers:
             try:
-                order = fetch_order(cid, number, key, customer_number, password,
-                                    timeout=timeout, max_retries=max_retries,
-                                    backoff=retry_backoff)
+                order = fetch_order(
+                    cid,
+                    number,
+                    key,
+                    customer_number,
+                    password,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    backoff=retry_backoff,
+                )
             except APIRequestError as e:
-                logger.error("Stopping the sweep after repeated failures (%s). "
-                             "%d Order(s) re-requested so far; rerun to continue.",
-                             e, requested)
+                logger.error(
+                    "Stopping the sweep after repeated failures (%s). "
+                    "%d Order(s) re-requested so far; rerun to continue.",
+                    e,
+                    requested,
+                )
                 break
             requested += 1
             if not order:
-                logger.warning("Order #%s returned nothing; leaving it as it is.",
-                               number)
+                logger.warning(
+                    "Order #%s returned nothing; leaving it as it is.", number
+                )
                 bar.update(1)
                 continue
             if out_dir is not None:
                 path = order_path(order, out_dir)
-                do_save, _reason = save_decision(path, os.path.exists(path),
-                                                 overwrite=overwrite,
-                                                 refresh_stale=refresh_stale)
+                do_save, _reason = save_decision(
+                    path,
+                    os.path.exists(path),
+                    overwrite=overwrite,
+                    refresh_stale=refresh_stale,
+                )
                 if do_save:
                     save_order(order, out_dir)
             stored, stops = _store(conn, [order], source_key)
@@ -578,8 +721,9 @@ def sweep_in_flight(conn, cid, key, customer_number=None, password=None,
     finally:
         bar.close()
 
-    logger.info("Sweep done: re-requested %d Order(s), updated %d.",
-                requested, orders_stored)
+    logger.info(
+        "Sweep done: re-requested %d Order(s), updated %d.", requested, orders_stored
+    )
     return SweepResult(len(numbers), requested, orders_stored, stops_stored)
 
 
@@ -659,7 +803,11 @@ def stop_rows(order):
         packages = stop.get("packages")
         yield (
             [cell_value(order.get("order_number")), i, stop_count]
-            + [cell_value(stop.get(k)) for k in STOP_FIELDS if k not in DROPPED_STOP_FIELDS]
+            + [
+                cell_value(stop.get(k))
+                for k in STOP_FIELDS
+                if k not in DROPPED_STOP_FIELDS
+            ]
             + [
                 cell_value(contact.get("name")),
                 cell_value(contact.get("phone")),
@@ -682,7 +830,9 @@ def write_workbook(orders, path, with_stops=True):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    book = xlsxwriter.Workbook(path, {"constant_memory": True, "strings_to_urls": False})
+    book = xlsxwriter.Workbook(
+        path, {"constant_memory": True, "strings_to_urls": False}
+    )
     bold = book.add_format({"bold": True})
     n_orders = n_stops = 0
     try:
@@ -699,8 +849,11 @@ def write_workbook(orders, path, with_stops=True):
             n_orders += 1
             sheet.write_row(n_orders, 0, order_row(o))
         if dropped_orders:
-            logger.warning("orders sheet hit Excel's %d-row limit; %d order(s) omitted",
-                           EXCEL_MAX_DATA_ROWS, dropped_orders)
+            logger.warning(
+                "orders sheet hit Excel's %d-row limit; %d order(s) omitted",
+                EXCEL_MAX_DATA_ROWS,
+                dropped_orders,
+            )
 
         if with_stops:
             stops_sheet = book.add_worksheet("route_stops")
@@ -716,9 +869,12 @@ def write_workbook(orders, path, with_stops=True):
                     n_stops += 1
                     stops_sheet.write_row(n_stops, 0, row)
             if dropped_stops:
-                logger.warning("route_stops sheet hit Excel's %d-row limit; %d stop(s) "
-                               "omitted — use process_route_stops.py for the full set",
-                               EXCEL_MAX_DATA_ROWS, dropped_stops)
+                logger.warning(
+                    "route_stops sheet hit Excel's %d-row limit; %d stop(s) "
+                    "omitted — use process_route_stops.py for the full set",
+                    EXCEL_MAX_DATA_ROWS,
+                    dropped_stops,
+                )
     finally:
         book.close()
 
@@ -782,16 +938,22 @@ def summarize(result, with_json=True, sweep=None):
     orders = result.orders
     on_account = f" (account holds {result.total:,})" if result.total else ""
     print(f"\nRetrieved {len(orders):>7,}  order(s) from the API{on_account}")
-    print(f"Stored    {result.orders_stored:>7,}  order(s) new or updated, "
-          f"{result.stops_stored:,} route stop(s)")
+    print(
+        f"Stored    {result.orders_stored:>7,}  order(s) new or updated, "
+        f"{result.stops_stored:,} route stop(s)"
+    )
     if with_json:
-        print(f"Saved     {result.saved:>7,}  JSON file(s) written, "
-              f"{result.skipped:,} already on disk")
+        print(
+            f"Saved     {result.saved:>7,}  JSON file(s) written, "
+            f"{result.skipped:,} already on disk"
+        )
     else:
         print(f"Saved     {'-':>7}  JSON output disabled (--no-json)")
     if sweep is not None:
-        print(f"Swept     {sweep.orders_stored:>7,}  in-flight Order(s) updated, "
-              f"{sweep.requested:,} re-requested")
+        print(
+            f"Swept     {sweep.orders_stored:>7,}  in-flight Order(s) updated, "
+            f"{sweep.requested:,} re-requested"
+        )
 
     if not orders:
         return
@@ -801,8 +963,10 @@ def summarize(result, with_json=True, sweep=None):
         cust = o.get("customer_number", "?")
         ready = o.get("ready_time", "")
         price = o.get("final_price", o.get("price", ""))
-        print(f"  - #{num}  flags={order_flags(o)}  customer={cust}  "
-              f"ready={ready}  price={price}")
+        print(
+            f"  - #{num}  flags={order_flags(o)}  customer={cust}  "
+            f"ready={ready}  price={price}"
+        )
     if len(orders) > 5:
         print(f"  ... and {len(orders) - 5} more")
 
@@ -811,97 +975,194 @@ def main():
     load_dotenv()  # populate os.environ from .env before reading defaults
 
     parser = argparse.ArgumentParser(description="Test Digital Waybill GET all orders.")
-    parser.add_argument("--cid", default=os.environ.get("DWB_CID"),
-                        help="Company/account id (path segment). Env: DWB_CID")
-    parser.add_argument("--key", default=os.environ.get("DWB_KEY"),
-                        help="API key. Env: DWB_KEY")
-    parser.add_argument("--customer-number", default=os.environ.get("DWB_CUSTOMER_NUMBER"),
-                        help="Customer number (QuickEntry). Env: DWB_CUSTOMER_NUMBER")
-    parser.add_argument("--password", default=os.environ.get("DWB_PASSWORD"),
-                        help="Password (QuickEntry). Env: DWB_PASSWORD")
-    parser.add_argument("--page-size", type=int, default=50,
-                        help="Orders per page (default 50; the API caps this at 50).")
-    parser.add_argument("--max-pages", type=int, default=1,
-                        help="Safety cap on pages (default 1; raise to fetch more).")
-    parser.add_argument("--page-delay", type=float, default=1.0,
-                        help="Seconds to wait between page requests (default 1.0).")
-    parser.add_argument("--max-retries", type=int, default=5,
-                        help="Retries for transient errors (429/5xx/network) per "
-                             "request (default 5).")
-    parser.add_argument("--retry-backoff", type=float, default=2.0,
-                        help="Base seconds for exponential retry backoff (default 2.0).")
-    parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout (s).")
-    parser.add_argument("--dsn", default=None,
-                        help="Postgres connection string for the Order store. "
-                             "Env: DWB_DSN, or a DWB_DSN line in .env.")
-    parser.add_argument("--out-dir", default="./output/orders",
-                        help="Directory for the per-order JSON files (default ./output/orders).")
-    parser.add_argument("--no-json", "--no-save", dest="no_json", action="store_true",
-                        help="Stop writing the per-order JSON files. Orders still go "
-                             "to the database. The spreadsheet exporters still read "
-                             "those files, so leave this off until they are migrated.")
-    parser.add_argument("--overwrite", "--no-skip-terminal", action="store_true",
-                        help="Re-save every fetched order, even one already on disk "
-                             "(default: an order whose file exists is never rewritten).")
-    parser.add_argument("--refresh-stale", action="store_true",
-                        help="Also re-save an already-saved order whose stored copy is "
-                             "not yet completed/cancelled, so a copy captured while the "
-                             "order was still in flight picks up its final state.")
-    parser.add_argument("--incremental", action="store_true",
-                        help="Fetch only Orders newer than the highest one stored, "
-                             "stopping pagination as soon as a known Order is reached. "
-                             "Where to resume comes from the database, not the folder.")
-    parser.add_argument("--overlap-pages", type=int, default=5, metavar="N",
-                        help="Re-request the N most recent pages even under "
-                             "--incremental (default 5, i.e. 250 Orders). This is how "
-                             "an Order captured while In Flight picks up its final "
-                             "status; unchanged Orders cost no writes.")
-    parser.add_argument("--refresh-in-flight", action="store_true",
-                        help="After fetching, re-request the Orders still In Flight "
-                             "individually — the stragglers that fell outside the "
-                             "overlap window. One request each, so it is opt-in.")
-    parser.add_argument("--sweep-limit", type=int, default=200, metavar="N",
-                        help="Most Orders one --refresh-in-flight sweep will request "
-                             "(default 200). Newest first.")
-    parser.add_argument("--sweep-preview", action="store_true",
-                        help="Report which Orders --refresh-in-flight would request, "
-                             "and request none of them.")
-    parser.add_argument("--excel", default="output/orders.xlsx", metavar="PATH",
-                        help="Excel workbook to write: an 'orders' sheet (one row per order) "
-                             "and a 'route_stops' sheet (one row per stop) "
-                             "(default output/orders.xlsx).")
-    parser.add_argument("--no-excel", action="store_true",
-                        help="Skip writing the Excel workbook.")
-    parser.add_argument("--excel-from-dir", action="store_true",
-                        help="Build the workbook from every order_*.json in --out-dir (the "
-                             "whole archive) instead of only the orders fetched this run. "
-                             "Use this with --incremental.")
-    parser.add_argument("--no-excel-stops", action="store_true",
-                        help="Omit the route_stops sheet from the workbook.")
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="Log verbosity for the file, and console default (default INFO).")
-    parser.add_argument("--console-level", default=None,
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="Console verbosity, separate from the file. Use ERROR to show "
-                             "only the progress bar (default: same as --log-level).")
-    parser.add_argument("--log-file", default=None,
-                        help="Also write logs to this file (e.g. logs/fetch.log).")
-    parser.add_argument("--raw", action="store_true", help="Print full JSON of all orders.")
+    parser.add_argument(
+        "--cid",
+        default=os.environ.get("DWB_CID"),
+        help="Company/account id (path segment). Env: DWB_CID",
+    )
+    parser.add_argument(
+        "--key", default=os.environ.get("DWB_KEY"), help="API key. Env: DWB_KEY"
+    )
+    parser.add_argument(
+        "--customer-number",
+        default=os.environ.get("DWB_CUSTOMER_NUMBER"),
+        help="Customer number (QuickEntry). Env: DWB_CUSTOMER_NUMBER",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("DWB_PASSWORD"),
+        help="Password (QuickEntry). Env: DWB_PASSWORD",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=50,
+        help="Orders per page (default 50; the API caps this at 50).",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=1,
+        help="Safety cap on pages (default 1; raise to fetch more).",
+    )
+    parser.add_argument(
+        "--page-delay",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between page requests (default 1.0).",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=5,
+        help="Retries for transient errors (429/5xx/network) per request (default 5).",
+    )
+    parser.add_argument(
+        "--retry-backoff",
+        type=float,
+        default=2.0,
+        help="Base seconds for exponential retry backoff (default 2.0).",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Per-request timeout (s)."
+    )
+    parser.add_argument(
+        "--dsn",
+        default=None,
+        help="Postgres connection string for the Order store. "
+        "Env: DWB_DSN, or a DWB_DSN line in .env.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default="./output/orders",
+        help="Directory for the per-order JSON files (default ./output/orders).",
+    )
+    parser.add_argument(
+        "--no-json",
+        "--no-save",
+        dest="no_json",
+        action="store_true",
+        help="Stop writing the per-order JSON files. Orders still go "
+        "to the database. The spreadsheet exporters still read "
+        "those files, so leave this off until they are migrated.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        "--no-skip-terminal",
+        action="store_true",
+        help="Re-save every fetched order, even one already on disk "
+        "(default: an order whose file exists is never rewritten).",
+    )
+    parser.add_argument(
+        "--refresh-stale",
+        action="store_true",
+        help="Also re-save an already-saved order whose stored copy is "
+        "not yet completed/cancelled, so a copy captured while the "
+        "order was still in flight picks up its final state.",
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Fetch only Orders newer than the highest one stored, "
+        "stopping pagination as soon as a known Order is reached. "
+        "Where to resume comes from the database, not the folder.",
+    )
+    parser.add_argument(
+        "--overlap-pages",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Re-request the N most recent pages even under "
+        "--incremental (default 5, i.e. 250 Orders). This is how "
+        "an Order captured while In Flight picks up its final "
+        "status; unchanged Orders cost no writes.",
+    )
+    parser.add_argument(
+        "--refresh-in-flight",
+        action="store_true",
+        help="After fetching, re-request the Orders still In Flight "
+        "individually — the stragglers that fell outside the "
+        "overlap window. One request each, so it is opt-in.",
+    )
+    parser.add_argument(
+        "--sweep-limit",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Most Orders one --refresh-in-flight sweep will request "
+        "(default 200). Newest first.",
+    )
+    parser.add_argument(
+        "--sweep-preview",
+        action="store_true",
+        help="Report which Orders --refresh-in-flight would request, "
+        "and request none of them.",
+    )
+    parser.add_argument(
+        "--excel",
+        default="output/orders.xlsx",
+        metavar="PATH",
+        help="Excel workbook to write: an 'orders' sheet (one row per order) "
+        "and a 'route_stops' sheet (one row per stop) "
+        "(default output/orders.xlsx).",
+    )
+    parser.add_argument(
+        "--no-excel", action="store_true", help="Skip writing the Excel workbook."
+    )
+    parser.add_argument(
+        "--excel-from-dir",
+        action="store_true",
+        help="Build the workbook from every order_*.json in --out-dir (the "
+        "whole archive) instead of only the orders fetched this run. "
+        "Use this with --incremental.",
+    )
+    parser.add_argument(
+        "--no-excel-stops",
+        action="store_true",
+        help="Omit the route_stops sheet from the workbook.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Log verbosity for the file, and console default (default INFO).",
+    )
+    parser.add_argument(
+        "--console-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Console verbosity, separate from the file. Use ERROR to show "
+        "only the progress bar (default: same as --log-level).",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Also write logs to this file (e.g. logs/fetch.log).",
+    )
+    parser.add_argument(
+        "--raw", action="store_true", help="Print full JSON of all orders."
+    )
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level, log_file=args.log_file,
-                  console_level=args.console_level)
+    setup_logging(
+        level=args.log_level, log_file=args.log_file, console_level=args.console_level
+    )
 
-    missing = [n for n, v in (("--cid/DWB_CID", args.cid), ("--key/DWB_KEY", args.key)) if not v]
+    missing = [
+        n
+        for n, v in (("--cid/DWB_CID", args.cid), ("--key/DWB_KEY", args.key))
+        if not v
+    ]
     if missing:
         parser.error(f"Missing required credential(s): {', '.join(missing)}")
 
     if args.excel_from_dir and args.no_excel:
         parser.error("--excel-from-dir has no effect with --no-excel")
     if args.excel_from_dir and args.no_json:
-        parser.error("--excel-from-dir reads the saved order files, so it can't be "
-                     "combined with --no-json")
+        parser.error(
+            "--excel-from-dir reads the saved order files, so it can't be "
+            "combined with --no-json"
+        )
 
     # Connect before the first request: a run that fetches for twenty minutes
     # and then discovers it cannot store anything has wasted rate limit.
@@ -935,12 +1196,21 @@ def main():
 
         if args.refresh_in_flight or args.sweep_preview:
             sweep = sweep_in_flight(
-                conn, args.cid, args.key, args.customer_number, args.password,
-                timeout=args.timeout, limit=args.sweep_limit,
-                preview=args.sweep_preview, request_delay=args.page_delay,
-                max_retries=args.max_retries, retry_backoff=args.retry_backoff,
-                out_dir=out_dir, overwrite=args.overwrite,
-                refresh_stale=args.refresh_stale)
+                conn,
+                args.cid,
+                args.key,
+                args.customer_number,
+                args.password,
+                timeout=args.timeout,
+                limit=args.sweep_limit,
+                preview=args.sweep_preview,
+                request_delay=args.page_delay,
+                max_retries=args.max_retries,
+                retry_backoff=args.retry_backoff,
+                out_dir=out_dir,
+                overwrite=args.overwrite,
+                refresh_stale=args.refresh_stale,
+            )
     finally:
         conn.close()
 
@@ -949,21 +1219,34 @@ def main():
     else:
         summarize(result, with_json=not args.no_json, sweep=sweep)
 
-    logger.info("Stored %d Order(s) and %d Route Stop(s) in the database",
-                result.orders_stored, result.stops_stored)
+    logger.info(
+        "Stored %d Order(s) and %d Route Stop(s) in the database",
+        result.orders_stored,
+        result.stops_stored,
+    )
     if not args.no_json:
-        logger.info("Wrote %d order file(s) to %s/ (%d already-saved order(s) skipped)",
-                    saved, args.out_dir, skipped)
+        logger.info(
+            "Wrote %d order file(s) to %s/ (%d already-saved order(s) skipped)",
+            saved,
+            args.out_dir,
+            skipped,
+        )
 
     if not args.no_excel:
         source = load_saved_orders(args.out_dir) if args.excel_from_dir else orders
         if not source:
-            logger.warning("No orders to export — writing an empty workbook to %s",
-                           args.excel)
-        n_orders, n_stops = write_workbook(source, args.excel,
-                                           with_stops=not args.no_excel_stops)
-        logger.info("Excel workbook: %s (%d order row(s), %d stop row(s))",
-                    os.path.abspath(args.excel), n_orders, n_stops)
+            logger.warning(
+                "No orders to export — writing an empty workbook to %s", args.excel
+            )
+        n_orders, n_stops = write_workbook(
+            source, args.excel, with_stops=not args.no_excel_stops
+        )
+        logger.info(
+            "Excel workbook: %s (%d order row(s), %d stop row(s))",
+            os.path.abspath(args.excel),
+            n_orders,
+            n_stops,
+        )
     return 0
 
 
