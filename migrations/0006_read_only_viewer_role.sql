@@ -20,7 +20,8 @@
 -- exists` check before either creates the role. Catching duplicate_object has
 -- no such window.
 --
--- No password is set. This file is committed to a public repository. The
+-- No password is set: this file is committed, and a password in version
+-- control is a password that cannot be rotated by rotating it. The
 -- password is set once by hand, alongside filling in .env — see the entry for
 -- DWB_VIEWER_PASSWORD in .env.example for the command:
 --
