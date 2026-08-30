@@ -12,6 +12,15 @@ sometimes one big row, sometimes per-order rows), and writes three sheets:
 
     python3 extract_invoice_orders.py
     python3 extract_invoice_orders.py --input-dir input/invoices --output output/invoice_orders.xlsx
+    python3 extract_invoice_orders.py --orders-dir output/orders   # add found_in_orders_dir
+    python3 extract_invoice_orders.py --orders-dir ''              # skip that column
+    python3 extract_invoice_orders.py -v                           # debug logging
+
+--orders-dir cross-checks each invoiced order # against the fetched archive, so
+the orders sheet says which invoiced orders were never fetched.
+
+Exit status: 0 on success, 2 if the input directory is missing or holds no PDFs.
+A PDF that fails to parse is logged and skipped; the others still get written.
 """
 
 import argparse
@@ -44,6 +53,12 @@ SERVICE_HINTS = ("VAN", "SPRINTER", "TRUCK", "CARGO", "BOX", "SUV", "CAR", "STRA
 
 @dataclass
 class InvoiceHeader:
+    """One invoice's header fields — a row of the "invoices" sheet.
+
+    Amounts and dates stay as the strings the PDF carried; this script is an
+    extractor, and re-typing them would bury a parse failure in a zero.
+    """
+
     vendor: str
     invoice_number: str = ""
     invoice_date: str = ""
@@ -57,6 +72,13 @@ class InvoiceHeader:
 
 @dataclass
 class Order:
+    """One invoiced order line (#NNNNNN) — a row of the "orders" sheet.
+
+    order_number is the number as printed on the invoice, which is Digital
+    Waybill's Order Number and not its record id, so joining it to the Order
+    store matches on a number the dispatch system reissues.
+    """
+
     vendor: str
     invoice_number: str
     invoice_date: str
@@ -75,6 +97,13 @@ class Order:
 
 @dataclass
 class Adjustment:
+    """An invoice line with no order # — a row of the "adjustments" sheet.
+
+    Kept apart from Order rather than folded in with a blank order number:
+    a global discount belongs to the invoice, and summing it per order would
+    attribute it to whichever line happened to be nearest.
+    """
+
     vendor: str
     invoice_number: str
     invoice_date: str
@@ -88,6 +117,8 @@ class Adjustment:
 
 @dataclass
 class ParsedInvoice:
+    """Everything one PDF yielded: its header, its order lines, its adjustments."""
+
     header: InvoiceHeader
     orders: list = field(default_factory=list)
     adjustments: list = field(default_factory=list)
@@ -542,6 +573,12 @@ def write_workbook(parsed_invoices, out_path, orders_dir=None):
 
 
 def main(argv=None):
+    """Parse every invoice PDF into one workbook. 0 on success, 2 if there is nothing to read.
+
+    A PDF that fails to parse is logged with its traceback and skipped, so one
+    malformed invoice does not cost the other several hundred; the log is the
+    only record that it was left out.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", default="input/invoices",
                         help="Root folder containing <vendor>/*.pdf invoices.")

@@ -14,6 +14,10 @@ and prints the breakdown as JSON, for callers that are not Python.
     python3 parse_price_breakdown.py --input input/History-2025-04-12.xlsx --show-failures 20
     python3 parse_price_breakdown.py --text 'Van: Miami to Miami~51~565~5AP~6~6245465'
     echo 'Van: ...~51~565~5AP~6~6245465' | python3 parse_price_breakdown.py --text - --final-price 65
+
+Exit status: 0 when every row's charges sum to its FinalPrice, 1 when any row
+fails — so this works as a scripted check that a new export still parses.
+Reads the export and nothing else: no database, no writes.
 """
 
 import argparse
@@ -31,6 +35,13 @@ def validate_workbook(path):
 
 
 def main(argv=None):
+    """Validate a workbook, or parse one string with --text.
+
+    Exits non-zero when any row's charges fail to sum to its FinalPrice, so a
+    format drift in a future export fails a scripted check rather than only
+    printing. Reads the export file and nothing else — no database, no
+    writes — so it is safe to point at a production export.
+    """
     parser = argparse.ArgumentParser(
         description="Parse and validate the PriceBreakdown column of a History export."
     )

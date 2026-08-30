@@ -6,6 +6,12 @@ row per route_stop, prefixed with order-level context, to an .xlsx file.
 
     python3 process_route_stops.py
     python3 process_route_stops.py --input-dir output/orders --output output/route_stops.xlsx
+    python3 process_route_stops.py --limit 500          # a first slice, to eyeball it
+    python3 process_route_stops.py --sheet-name stops   # name the worksheet
+    python3 process_route_stops.py --log-level DEBUG --log-file logs/flatten.log
+
+Exit status: 0 on success, 2 if the input directory is missing. Files that
+cannot be read are counted and reported, not silently dropped.
 """
 
 import argparse
@@ -26,6 +32,7 @@ TRUNC_MARKER = "…[truncated]"
 
 
 def _order_col(k):
+    """Prefix an Order field name for the column it gets in the flattened sheet."""
     # Avoid awkward doubled prefixes like "order_order_number".
     return k if k.startswith("order_") else f"order_{k}"
 
@@ -54,6 +61,12 @@ class TqdmLoggingHandler(logging.Handler):
 
 
 def setup_logging(level="INFO", log_file=None):
+    """Send this script's log to the terminal at `level`, and to `log_file` if given.
+
+    The logger is set to DEBUG and the handlers carry the level, so the file
+    can keep everything while the terminal stays readable. Detached from the
+    root logger, so importing this module cannot reconfigure someone else's.
+    """
     lvl = getattr(logging, str(level).upper(), logging.INFO)
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
@@ -112,6 +125,12 @@ def cell_value(v):
 
 
 def build_row(order, stop, stop_index, stop_count):
+    """Build one worksheet row: the Order's fields, the stop's position, then the stop.
+
+    Columns are emitted in COLUMNS order for every row, including the fields
+    dropped from the sheet, which are written empty rather than skipped — the
+    header must keep lining up with the cells beneath it.
+    """
     row = []
     for k in ORDER_FIELDS:
         row.append(cell_value(order.get(k)))
@@ -131,6 +150,7 @@ def build_row(order, stop, stop_index, stop_count):
 
 
 def parse_args(argv=None):
+    """Parse the command line; the module docstring is the --help text."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input-dir", default="output/orders", help="Directory containing order_*.json files")
     p.add_argument("--output", default="output/route_stops.xlsx", help="Path to the .xlsx file to write")
@@ -142,6 +162,11 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    """Flatten the archive into one workbook. 0 on success, 2 if the input is missing.
+
+    A file that cannot be read is counted and reported at the end, never
+    silently skipped: a workbook short of some Orders must say so.
+    """
     args = parse_args(argv)
     setup_logging(args.log_level, args.log_file)
 

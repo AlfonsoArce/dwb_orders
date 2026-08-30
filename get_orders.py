@@ -34,6 +34,42 @@ exporters have been migrated.
 A JSON file is only written when its order_number isn't already on disk; see
 --overwrite and --refresh-stale to change that. The database has its own rule:
 an Order is rewritten only when the dispatch system's revision marker is newer.
+
+How much to fetch, and how politely:
+    uv run get_orders.py --max-pages 20 --page-size 50
+    uv run get_orders.py --page-delay 2 --timeout 60
+    uv run get_orders.py --max-retries 8 --retry-backoff 3
+
+Fetching only what is new, then catching up the stragglers:
+    uv run get_orders.py --incremental
+    uv run get_orders.py --incremental --overlap-pages 10
+    uv run get_orders.py --refresh-in-flight --sweep-limit 50
+    uv run get_orders.py --sweep-preview             # name them, request none
+
+What gets written:
+    uv run get_orders.py --out-dir ./data
+    uv run get_orders.py --no-json                   # the database only
+    uv run get_orders.py --overwrite                 # rewrite every saved file
+    uv run get_orders.py --refresh-stale             # only files saved mid-flight
+    uv run get_orders.py --excel reports/orders.xlsx
+    uv run get_orders.py --no-excel
+    uv run get_orders.py --no-excel-stops            # drop the route_stops sheet
+    uv run get_orders.py --incremental --excel-from-dir   # workbook from the archive
+
+Credentials, connection and logging:
+    uv run get_orders.py --cid CID --key KEY
+    uv run get_orders.py --customer-number N --password P    # QuickEntry access
+    uv run get_orders.py --dsn "postgresql://dwb@127.0.0.1:5434/dwb_orders"
+    uv run get_orders.py --console-level ERROR --log-level DEBUG --log-file logs/fetch.log
+    uv run get_orders.py --raw                       # print the fetched JSON
+
+--max-pages defaults to 1, so a plain run fetches one page; raise it to fetch
+more. --excel-from-dir reads the saved files, so it cannot be combined with
+--no-json. --sweep-preview runs the sweep in report-only mode on its own, so
+it does not need --refresh-in-flight; --sweep-limit bounds whichever of the
+two is running.
+
+Exit status: 0 on success, 2 if the Order store cannot be reached.
 """
 
 import argparse
@@ -972,6 +1008,13 @@ def summarize(result, with_json=True, sweep=None):
 
 
 def main():
+    """Fetch Orders and store them. 0 on success, 2 if the store cannot be reached.
+
+    The store is the source of truth; the JSON files and the workbook are
+    by-products for the exporters that still read them. Transient API failures
+    are retried and then given up on, keeping whatever was already fetched —
+    the run is resumable, so a partial fetch is not a lost one.
+    """
     load_dotenv()  # populate os.environ from .env before reading defaults
 
     parser = argparse.ArgumentParser(description="Test Digital Waybill GET all orders.")

@@ -14,6 +14,11 @@ project.
 
     python3 route_stops_by_cost_center.py
     python3 route_stops_by_cost_center.py --input-dir output/orders --output output/route_stops_by_cost_center.xlsx
+    python3 route_stops_by_cost_center.py --limit 500    # a first slice, to eyeball it
+    python3 route_stops_by_cost_center.py --log-level DEBUG --log-file logs/by_cc.log
+
+Exit status: 0 on success, 2 if the input directory is missing. Files that
+cannot be read are counted and reported, not silently dropped.
 """
 
 import argparse
@@ -46,6 +51,12 @@ class TqdmLoggingHandler(logging.Handler):
 
 
 def setup_logging(level="INFO", log_file=None):
+    """Send this script's log to the terminal at `level`, and to `log_file` if given.
+
+    The logger is set to DEBUG and the handlers carry the level, so the file
+    can keep everything while the terminal stays readable. Detached from the
+    root logger, so importing this module cannot reconfigure someone else's.
+    """
     lvl = getattr(logging, str(level).upper(), logging.INFO)
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
@@ -68,6 +79,13 @@ def setup_logging(level="INFO", log_file=None):
 
 
 def norm(v):
+    """Uppercase and collapse whitespace; None and blanks become "".
+
+    Every part of a location key and every company name goes through this, so
+    "  Ste 200 " and "STE 200" are one place rather than two. Note what it is
+    not: no USPS abbreviation and no suite extraction, which extract_companies
+    does — two runs over the same archive will not agree on a location.
+    """
     if v is None:
         return ""
     return " ".join(str(v).upper().split())
@@ -93,12 +111,18 @@ def list_order_files(input_dir):
 
 
 def truncate_cell(s):
+    """Cut a string to what an Excel cell holds, marking that it was cut.
+
+    The companies column joins every name seen at one address, which at a busy
+    warehouse runs past the limit and would otherwise abort the write.
+    """
     if len(s) > EXCEL_CELL_LIMIT:
         return s[: EXCEL_CELL_LIMIT - len(TRUNC_MARKER)] + TRUNC_MARKER
     return s
 
 
 def parse_args(argv=None):
+    """Parse the command line; the module docstring is the --help text."""
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -116,6 +140,13 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    """Write the summary and locations sheets. 0 on success, 2 if the input is missing.
+
+    A stop whose location is wholly blank is dropped; every other stop is
+    counted, and an Order with no cost_center lands under "(blank)" rather
+    than disappearing from the totals. Files that cannot be read are counted
+    and reported at the end.
+    """
     args = parse_args(argv)
     setup_logging(args.log_level, args.log_file)
 

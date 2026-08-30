@@ -21,8 +21,21 @@ Reads order_*.json files produced by get_orders.py and runs three explicit phase
 Output is a single .xlsx workbook.
 
     python3 extract_companies.py
+    python3 extract_companies.py --input-dir output/orders --output output/companies.xlsx
+    python3 extract_companies.py --limit 500           # a first slice, to eyeball it
     python3 extract_companies.py --cluster-threshold 95
+    python3 extract_companies.py --cluster-threshold 100   # cluster nothing
     python3 extract_companies.py --no-cluster-names    # skip phase 2
+    python3 extract_companies.py --log-level DEBUG --log-file logs/companies.log
+
+--cluster-threshold is the rapidfuzz token_set_ratio a name must reach to join
+an existing cluster: lower merges more variants and risks merging two real
+companies, higher splits one company across spellings. Start at the default 92
+and read the company_raw_variants column before moving it.
+
+Exit status: 0 on success, 2 if the input directory is missing. Without
+scourgify or rapidfuzz installed the run still completes, more coarsely, and
+says so in the log.
 """
 
 import argparse
@@ -99,6 +112,12 @@ ORDER_TIME_FMT = "%a, %d %b %Y %H:%M:%S"
 
 
 def setup_logging(level, log_file):
+    """Send this script's log to the terminal at `level`, and to `log_file` if given.
+
+    The logger is set to DEBUG and the handlers carry the level, so the file
+    can keep everything while the terminal stays readable. Detached from the
+    root logger, so importing this module cannot reconfigure someone else's.
+    """
     lvl = getattr(logging, str(level).upper(), logging.INFO)
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
@@ -106,6 +125,8 @@ def setup_logging(level, log_file):
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S")
 
     class TqdmHandler(logging.Handler):
+        """Emit log records via tqdm.write so they don't corrupt the progress bar."""
+
         def emit(self, record):
             try:
                 tqdm.write(self.format(record), file=sys.stderr)
@@ -127,6 +148,12 @@ def setup_logging(level, log_file):
 
 
 def list_order_files(input_dir):
+    """Return order JSON paths sorted numerically by the order_number in the filename.
+
+    Numerically, so order_9.json precedes order_10.json and two runs read the
+    archive in the same sequence; names that do not end in a number sort after
+    the ones that do, alphabetically, rather than raising.
+    """
     def key(name):
         stem = name.removesuffix(".json")
         num = stem.rsplit("_", 1)[-1]
@@ -186,6 +213,14 @@ def cluster_company_names(name_counts, threshold=92, min_name_len=4):
 
 
 def norm_company(raw):
+    """Return (display, key) for a raw company name.
+
+    The display form is tidied only — uppercased, whitespace and punctuation
+    regularised — and is what a reader recognises. The key additionally drops
+    the legal suffix and any remaining punctuation, so "ACME INC." and "Acme,
+    LLC" collapse to one clustering key while both display forms survive in
+    the audit column.
+    """
     if not raw:
         return "", ""
     s = WS.sub(" ", str(raw).strip().upper())
@@ -327,6 +362,11 @@ def normalize_stop(stop):
 
 
 def parse_order_time(s):
+    """Parse the API's order time, or None if it is absent or in another format.
+
+    Only used to date first_seen/last_seen, so an unparseable value narrows a
+    date range rather than failing the run.
+    """
     if not s:
         return None
     try:
@@ -337,6 +377,7 @@ def parse_order_time(s):
 
 
 def parse_args(argv=None):
+    """Parse the command line; the module docstring is the --help text."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input-dir", default="output/orders")
     p.add_argument("--output", default="output/companies.xlsx")
@@ -376,6 +417,13 @@ COLUMNS = [
 
 
 def main(argv=None):
+    """Run the three phases and write the workbook. 0 on success, 2 if input is missing.
+
+    Both optional dependencies degrade rather than stop the run: without
+    scourgify addresses fall back to the regex normalizer, without rapidfuzz
+    phase 2 is skipped and every name is its own cluster. Either way the run
+    says so in the log, because the output is materially coarser.
+    """
     args = parse_args(argv)
     setup_logging(args.log_level, args.log_file)
 
@@ -544,6 +592,12 @@ def main(argv=None):
     )
 
     def to_row(e):
+        """One aggregated entry as a worksheet row, in COLUMNS order.
+
+        The raw variant columns are the audit trail for phases 1 and 2: they
+        record every spelling that was folded into this row, so a wrong merge
+        is visible in the output instead of only in the input.
+        """
         first = e["first_seen"].strftime("%Y-%m-%d") if e["first_seen"] else ""
         last = e["last_seen"].strftime("%Y-%m-%d") if e["last_seen"] else ""
         return [
