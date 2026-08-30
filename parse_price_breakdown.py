@@ -20,32 +20,14 @@ import argparse
 import json
 import sys
 
-import openpyxl
-
+from dwb.enrich import read_export
 from dwb.price_breakdown import parse
 
 
 def validate_workbook(path):
     """Yield (row_id, breakdown, final_price, matches) per data row."""
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = workbook[workbook.sheetnames[0]]
-        rows = sheet.iter_rows(values_only=True)
-        header = {name: i for i, name in enumerate(next(rows))}
-        for column in ("ID", "PriceBreakdown", "FinalPrice"):
-            if column not in header:
-                raise SystemExit(f"{path}: missing column {column!r}")
-        for row in rows:
-            breakdown = parse(row[header["PriceBreakdown"]])
-            final_price = row[header["FinalPrice"]]
-            yield (
-                row[header["ID"]],
-                breakdown,
-                final_price,
-                breakdown.matches(final_price),
-            )
-    finally:
-        workbook.close()
+    for record_id, _text, breakdown, final_price in read_export(path):
+        yield record_id, breakdown, final_price, breakdown.matches(final_price)
 
 
 def main(argv=None):
