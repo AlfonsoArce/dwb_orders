@@ -78,6 +78,29 @@ The class of vehicle or handling a Route Stop requires, such as a 16 ft box
 truck.
 _Avoid_: Vehicle type, order type
 
+## Pricing
+
+**Final Price**:
+The amount an Order is billed at — the sum of its Charges. Distinct from the
+price first quoted when the Order was placed.
+_Avoid_: Price (unqualified), total, cost
+
+**Charge**:
+One line of an Order's Final Price: a description with a quantity, a rate, and
+a Pricing Code. Waiting time, extra stops, and fuel surcharges are Charges
+alongside the base price.
+_Avoid_: Line item, fee, surcharge (one kind of Charge)
+
+**Price Breakdown**:
+The complete list of an Order's Charges. The dispatch system reports it only
+in History exports; its API gives the Final Price as a single number.
+_Avoid_: Price details, itemisation
+
+**Pricing Code**:
+How a Charge's rate was set: auto-priced from the pricelist (AP), entered
+manually by a dispatcher (M), or added automatically as a surcharge (AS).
+_Avoid_: Charge type, rate type
+
 ## Customers and places
 
 **Customer**:
