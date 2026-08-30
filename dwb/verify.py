@@ -10,6 +10,26 @@ it is deliberately paranoid and deliberately read-only. It does two things:
 
 Anything that does not line up is reported in enough detail to go and look,
 and makes the check fail.
+
+Run from the repository root, where the wrapper lives:
+
+    uv run python verify_import.py                      # counts, plus a 200-Order sample
+    uv run python verify_import.py --sample 500
+    uv run python verify_import.py --sample 500 --seed 7   # repeat a check exactly
+    uv run python verify_import.py --input-dir path/to/orders --source another_tms
+    uv run python verify_import.py --no-progress        # for a cron log
+
+Retiring the archive, once the check passes and ./backup.sh dump has run:
+
+    uv run python verify_import.py --retire-to ~/dwb_orders_archive        # describe it
+    uv run python verify_import.py --retire-to ~/dwb_orders_archive --yes  # do it
+    uv run python verify_import.py --retire-to DIR --backup-dir ~/other_backups
+
+Without --yes the move is only described, so the first form is always safe to
+run. --sample 0 skips the diffing and checks counts alone.
+
+Exit status: 0 when the database matches the archive, 1 when it does not or
+when retirement was refused, 2 when the check could not start.
 """
 
 import argparse
@@ -57,6 +77,11 @@ class Report:
 
     @property
     def ok(self):
+        """Whether everything lined up. A file that could not be read is a failure.
+
+        Unread means unverified, and this report is the evidence for retiring
+        the archive, so it may not pass on a partial reading of it.
+        """
         return not (self.missing_from_database or self.only_in_database
                     or self.stop_count_mismatches or self.payload_mismatches
                     or self.archive_orders != self.stored_orders
@@ -64,6 +89,11 @@ class Report:
                     or sum(self.problems.values()))
 
     def lines(self):
+        """The report as printable lines, ending in the verdict.
+
+        Mismatches are listed, not just counted, and capped at twenty each:
+        enough to go and look at, short of printing the archive back.
+        """
         yield f"Archive:            {self.input_dir}"
         yield f"Files found:        {self.files_found}"
         yield f"Files not read:     {sum(self.problems.values())}" \
@@ -238,6 +268,11 @@ def retire_archive(report, input_dir, destination, backup_dir=None, confirmed=Fa
 
 
 def main(argv=None):
+    """Verify from the command line, and optionally retire the archive afterwards.
+
+    0 when the database matches the archive, 1 when it does not or when
+    retirement was refused, 2 when the check could not start.
+    """
     load_dotenv()
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

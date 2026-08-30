@@ -104,6 +104,7 @@ IngestResult = collections.namedtuple(
 
 
 def _staging_ddl(name, spec):
+    """The DDL for one staging table, built from its column spec."""
     columns = ", ".join(f"{col} {type_}" for col, type_ in spec)
     # Temp tables are unlogged by nature, so a bulk load into one costs no WAL;
     # on commit delete rows means every batch starts empty without a truncate.
@@ -197,6 +198,11 @@ def stop_values(stop, order, position, source_key=DEFAULT_SOURCE,
 
 
 def _copy(cur, table, columns, rows):
+    """Stream rows into a staging table with COPY.
+
+    COPY rather than executemany because a batch is hundreds of rows wide and
+    the import is 169,000 Orders deep; the round trips are the cost.
+    """
     placeholders = ", ".join(columns)
     with cur.copy(f"copy {table} ({placeholders}) from stdin") as copy:
         for row in rows:
@@ -239,6 +245,11 @@ where o.order_id = any(%s)
 
 
 def _upsert_orders_sql():
+    """UPSERT_ORDERS with its column list filled in from ORDER_STAGING.
+
+    Generated rather than written out so that adding a column to the staging
+    spec cannot leave the statement quietly writing the old set.
+    """
     columns = ", ".join(ORDER_COLUMNS)
     # Everything but the natural key is refreshed; first_ingested_at is not.
     assignments = ",\n    ".join(
@@ -248,6 +259,11 @@ def _upsert_orders_sql():
 
 
 def _replace_stops_sql():
+    """REPLACE_STOPS with its column list filled in, for the same reason.
+
+    The Order's natural key and revision are staged but not inserted: they
+    exist to find the Order row and to pick a winner within a batch.
+    """
     columns = ", ".join(_STOP_INSERT_COLUMNS)
     qualified = ", ".join(f"s.{c}" for c in _STOP_INSERT_COLUMNS)
     return REPLACE_STOPS.format(columns=columns, qualified=qualified)

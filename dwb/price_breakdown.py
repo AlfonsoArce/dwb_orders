@@ -119,6 +119,12 @@ def _number(raw):
 
 
 def _charge(description, fives, sixes):
+    """Assemble one Charge from a description and the tokens collected after it.
+
+    The ``~5`` tokens are positional — quantity, rate, pricing code — so a
+    charge that carries fewer than three simply leaves the rest null rather
+    than shifting the ones it does carry into the wrong field.
+    """
     quantity = _number(fives[0]) if len(fives) > 0 else None
     rate = _number(fives[1]) if len(fives) > 1 else None
     code = fives[2] if len(fives) > 2 else None

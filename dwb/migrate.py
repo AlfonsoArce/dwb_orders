@@ -8,6 +8,16 @@ re-importing 169,000 Orders.
 Deliberately not wired into the container's initialisation scripts: those run
 only when the data directory is empty, which would tie every schema change to
 a rebuild of the database.
+
+Run from the repository root, where the wrapper lives:
+
+    uv run python migrate.py                    # apply everything pending
+    uv run python migrate.py --status           # list applied/pending, change nothing
+    uv run python migrate.py --dir migrations   # another directory of NNNN_slug.sql
+    uv run python migrate.py --dsn "postgresql://dwb@127.0.0.1:5434/dwb_orders"
+
+Exit status: 0 applied or nothing to do, 1 a migration failed or an applied one
+has been edited, 2 the database is unreachable.
 """
 
 import argparse
@@ -65,6 +75,7 @@ def discover(directory=None):
 
 
 def _checksum(path):
+    """The file's SHA-256, which is how an applied migration that changed is spotted."""
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
 
@@ -123,6 +134,11 @@ def apply_pending(conn, directory=None, log=None):
 
 
 def main(argv=None):
+    """Apply or report migrations from the command line.
+
+    0 when there was nothing to do or everything applied, 1 when a migration
+    failed or an applied one has been edited, 2 when the database is unreachable.
+    """
     load_dotenv()
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)

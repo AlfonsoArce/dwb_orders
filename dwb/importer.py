@@ -9,6 +9,24 @@ revision-guarded upsert makes free.
 Damaged files are counted, never silently skipped. An empty file, an
 unreadable file and a file that vanished mid-run are three different problems,
 and a summary that hid them would misreport the import as complete.
+
+Run from the repository root, where the wrapper lives:
+
+    uv run python import_orders.py                     # output/orders, resuming
+    uv run python import_orders.py --input-dir path/to/orders
+    uv run python import_orders.py --limit 1000        # a first slice, still resumable
+    uv run python import_orders.py --restart           # forget progress, read every file
+    uv run python import_orders.py --batch-size 1000   # Orders per transaction
+    uv run python import_orders.py --source another_tms
+    uv run python import_orders.py --no-progress       # for a cron log
+    uv run python import_orders.py --dsn "postgresql://dwb@127.0.0.1:5434/dwb_orders"
+
+--limit and --restart are the two that interact: --limit stops early but still
+records where it got to, so repeating it walks the archive a slice at a time,
+while --restart throws that record away and reads everything again.
+
+Exit status: 0 on success, 2 if the input directory is missing or the store is
+unreachable.
 """
 
 import argparse
@@ -37,9 +55,11 @@ class Summary:
 
     @property
     def files_not_read(self):
+        """How many files could not be turned into an Order, for any reason."""
         return sum(self.problems.values())
 
     def lines(self):
+        """The summary as printable lines, problems itemised rather than totalled."""
         yield f"Files found:        {self.files_found}"
         if self.files_skipped:
             yield f"Files already done: {self.files_skipped} (resumed)"
@@ -62,6 +82,7 @@ def read_progress(conn, source_key, input_dir):
 
 
 def clear_progress(conn, source_key, input_dir):
+    """Forget where this directory's import got to, so --restart reads it all again."""
     with conn.cursor() as cur:
         cur.execute("delete from import_progress "
                     "where source_key = %s and input_dir = %s",
@@ -69,6 +90,13 @@ def clear_progress(conn, source_key, input_dir):
 
 
 def record_progress(conn, source_key, input_dir, last_file, files, orders, stops):
+    """Move this directory's resume point to last_file and add the batch's counts.
+
+    The counts accumulate across runs while last_file is overwritten, so a
+    progress row reports the whole import rather than its final batch. Written
+    in the batch's own transaction: the resume point and the rows it refers to
+    commit together or not at all.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             insert into import_progress (source_key, input_dir, last_file,
@@ -110,6 +138,7 @@ def import_archive(conn, input_dir, source_key=ingest.DEFAULT_SOURCE,
     last_file = None
 
     def flush():
+        """Ingest the pending batch, record where it reached, and commit."""
         nonlocal batch, last_file
         if not batch and last_file is None:
             return
@@ -140,6 +169,7 @@ def import_archive(conn, input_dir, source_key=ingest.DEFAULT_SOURCE,
 
 
 def main(argv=None):
+    """Run an import from the command line. 0 on success, 2 if it could not start."""
     load_dotenv()
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

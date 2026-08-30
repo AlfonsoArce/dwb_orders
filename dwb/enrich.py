@@ -16,6 +16,21 @@ exports still name.
 Re-running is safe: each Order's breakdown row is upserted and its Charges
 are replaced wholesale, so a corrected export supersedes an earlier run
 instead of accumulating beside it.
+
+Run from the repository root, where the wrapper lives:
+
+    uv run python enrich_price_breakdown.py            # input/History-2025-04-12.xlsx
+    uv run python enrich_price_breakdown.py --input input/History-2026-01-31.xlsx
+    uv run python enrich_price_breakdown.py --batch-size 1000
+    uv run python enrich_price_breakdown.py --source another_tms
+    uv run python enrich_price_breakdown.py --no-progress
+
+To check an export parses before letting it near the store, parse_price_breakdown.py
+validates the same column and writes nothing.
+
+Exit status: 0 on success, 2 if the export file is missing or the store is
+unreachable. A row whose charges miss FinalPrice is stored and flagged, not a
+failure.
 """
 
 import argparse
@@ -67,6 +82,7 @@ class Summary:
         self.unmatched = []        # export IDs naming no stored Order
 
     def lines(self):
+        """The summary as printable lines, unmatched export IDs listed to a cap."""
         yield f"Rows read:         {self.rows_read}"
         yield f"Orders enriched:   {self.orders_enriched}"
         yield f"Charges written:   {self.charges_written}"
@@ -162,6 +178,11 @@ def enrich(conn, input_path, source_key=DEFAULT_SOURCE,
 
 
 def main(argv=None):
+    """Run an enrichment from the command line. 0 on success, 2 if it could not start.
+
+    Rows whose charges do not sum to FinalPrice are stored and counted, not
+    rejected, so a sum mismatch is reported without failing the run.
+    """
     load_dotenv()
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

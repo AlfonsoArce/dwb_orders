@@ -23,6 +23,21 @@ health check that fails when its dependency fails tells you less than one that
 stays up and names the problem.
 
 Hand-written SQL throughout, per ADR-0003.
+
+Run from the repository root, where the wrapper lives:
+
+    uv run python viewer.py                       # http://127.0.0.1:8083
+    uv run python viewer.py --port 9000
+    uv run python viewer.py --host 0.0.0.0        # what the container does
+    uv run python viewer.py --assets frontend/dist
+    uv run python viewer.py --dsn "postgresql://dwb_viewer@127.0.0.1:5434/dwb_orders"
+
+The frontend has to be built first — cd frontend && npm install && npm run build
+— or run `npm run dev` there, which serves it with hot reload and proxies the API
+back here. Until either happens the root path says so rather than 404ing.
+
+The viewer's role needs its own password in DWB_VIEWER_PASSWORD; it will not
+borrow POSTGRES_PASSWORD. See migration 0006.
 """
 
 import argparse
@@ -96,11 +111,15 @@ class DatabaseHealth(BaseModel):
 
 
 class NewestOrder(BaseModel):
+    """The furthest the fetcher has got: the highest Order Number, and when it was placed."""
+
     order_number: int
     placed_at: Optional[str] = None
 
 
 class StoreFigures(BaseModel):
+    """What the store holds, as of the one query the health panel makes."""
+
     total_orders: int
     in_flight_orders: int
     newest_order: Optional[NewestOrder] = None
@@ -108,6 +127,8 @@ class StoreFigures(BaseModel):
 
 
 class Health(BaseModel):
+    """The health endpoint's whole answer: whether the store could be read, and what it holds."""
+
     database: DatabaseHealth
     # Absent when the database could not be reached: no figures is different
     # from figures that happen to be zero.
@@ -151,6 +172,12 @@ def create_app(dsn=None, assets=None):
     )
 
     def store_connection():
+        """Open one connection as the viewer's own role, for one request.
+
+        The password is passed explicitly so db.connect() never falls back to
+        POSTGRES_PASSWORD: borrowing the owning role's secret is how a
+        read-only account stops being read-only.
+        """
         return db.connect(dsn, password=resolve_viewer_password())
 
     @app.get("/api/health", response_model=Health)
@@ -214,6 +241,7 @@ def _serve_frontend(app, assets):
     if not os.path.isfile(index):
         @app.get("/", include_in_schema=False, response_class=PlainTextResponse)
         def unbuilt():
+            """Say how to build the frontend, rather than 404 on the root path."""
             return (
                 "The Orders viewer's frontend has not been built.\n\n"
                 "  cd frontend && npm install && npm run build\n\n"
@@ -223,6 +251,7 @@ def _serve_frontend(app, assets):
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend(path: str):
+        """Serve a built asset, or index.html so the client's router can route it."""
         if path == "api" or path.startswith("api/"):
             raise HTTPException(status_code=404, detail=f"No endpoint /{path}")
         return FileResponse(_asset_file(assets, path) or index)
@@ -233,6 +262,7 @@ def _serve_frontend(app, assets):
 # ---------------------------------------------------------------------------
 
 def main(argv=None):
+    """Serve the viewer from the command line, until interrupted."""
     load_dotenv()
     p = argparse.ArgumentParser(
         description="Serve the read-only Orders viewer.",
