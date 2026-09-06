@@ -337,15 +337,29 @@ class FakeDispatch:
                 query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
                 dispatch.requests.append((parsed.path, query))
                 parts = parsed.path.strip("/").split("/")
+                status = 200
                 if len(parts) == 3:
                     body = dispatch._single(parts[2])
+                    if body is None:
+                        # An Order Number the dispatch system never issued.
+                        # The real API is explicit about this — HTTP 404 with
+                        # a message naming the number — and the gap filler
+                        # depends on telling it apart from a failed request,
+                        # so the stub has to answer the way the API does.
+                        status = 404
+                        body = ""
                 else:
                     body = dispatch._page(query)
                 # The real API answers in Windows-1252, which is exactly why
                 # the fetcher has its own decoding step.
-                payload = json.dumps({"status": 200, "error": None, "body": body})
+                payload = json.dumps({
+                    "status": status,
+                    "error": (None if status == 200 else
+                              f"No order found for order number {parts[2]}."),
+                    "body": body,
+                })
                 encoded = payload.encode("cp1252", errors="replace")
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=windows-1252")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
@@ -377,7 +391,7 @@ class FakeDispatch:
 
     def _single(self, order_number):
         order = self.orders.get(int(order_number))
-        return {"order": order} if order else {"orders": []}
+        return {"order": order} if order else None
 
 
 @pytest.fixture

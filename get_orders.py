@@ -46,6 +46,20 @@ Fetching only what is new, then catching up the stragglers:
     uv run get_orders.py --refresh-in-flight --sweep-limit 50
     uv run get_orders.py --sweep-preview             # name them, request none
 
+Collecting Orders that were never fetched at all:
+    uv run get_orders.py --fill-gaps                 # the last 90 days
+    uv run get_orders.py --fill-gaps --fill-days 30
+    uv run get_orders.py --fill-gaps --fill-all --fill-limit 2000
+    uv run get_orders.py --fill-preview              # name them, request none
+
+Paging cannot reach those. An incremental run resumes from the highest Order
+Number stored, so an Order missing from *below* that point is invisible to it
+for ever, however many pages it is allowed. --fill-gaps asks the store which
+Order Numbers are absent and requests them one at a time; an Order comes back
+and is stored, or the API answers 404 for a number dispatch never issued.
+--fill-days bounds how far back to look, because after one clean sweep only
+recent holes are worth re-checking; --fill-all ignores the window.
+
 What gets written:
     uv run get_orders.py --out-dir ./data
     uv run get_orders.py --no-json                   # the database only
@@ -63,13 +77,25 @@ Credentials, connection and logging:
     uv run get_orders.py --console-level ERROR --log-level DEBUG --log-file logs/fetch.log
     uv run get_orders.py --raw                       # print the fetched JSON
 
+Keeping the store up to date, which is what the poller container runs:
+    uv run get_orders.py --incremental --max-pages 200 --overlap-pages 5
+
 --max-pages defaults to 1, so a plain run fetches one page; raise it to fetch
-more. --excel-from-dir reads the saved files, so it cannot be combined with
+more. Always raise it for an incremental run. --incremental resumes from the
+highest Order Number stored, so a run that stops after one page keeps the
+newest fifty Orders, moves the watermark past everything it did not fetch,
+and never comes back for them. Set it high enough to cover the gap since the
+last run: it is a ceiling, not a target, because --incremental stops of its
+own accord at the first Order already stored.
+
+--excel-from-dir reads the saved files, so it cannot be combined with
 --no-json. --sweep-preview runs the sweep in report-only mode on its own, so
 it does not need --refresh-in-flight; --sweep-limit bounds whichever of the
 two is running.
 
-Exit status: 0 on success, 2 if the Order store cannot be reached.
+Exit status: 0 on success, 2 if the Order store cannot be reached, and 3 if
+an incremental run stopped before it met the Orders already stored and so
+left a hole behind — see --fill-gaps, which clears it.
 """
 
 import argparse
@@ -199,14 +225,19 @@ def _retry_after_seconds(headers, default):
         return default  # HTTP-date form not parsed; fall back to backoff
 
 
-def request_json(url, timeout, max_retries=5, backoff=2.0):
+def request_json(url, timeout, max_retries=5, backoff=2.0, not_found_ok=False):
     """GET a URL and return (parsed_json, url).
 
     Transient failures (HTTP 429/5xx, connection errors, timeouts) are retried
     up to `max_retries` times with exponential backoff (honoring Retry-After),
     capped at MAX_BACKOFF per wait. Exhausted transient retries raise
     APIRequestError so the caller can stop gracefully and keep partial results.
-    Non-retryable errors (e.g. 401/404) or malformed JSON abort the program.
+    Non-retryable errors (e.g. 401/404) or malformed JSON abort the program,
+    unless not_found_ok is set, which turns a 404 into (None, url). Only the
+    gap filler asks for that: there, "no such Order" is the reply it went
+    looking for, while a 401 still has to be fatal — a run that mistook bad
+    credentials for an empty account would record the whole backlog as
+    non-existent.
     """
     safe_url = redact(url)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -247,6 +278,9 @@ def request_json(url, timeout, max_retries=5, backoff=2.0):
                     redact(detail),
                 )
                 raise APIRequestError(f"HTTP {e.code} after {attempt} attempts")
+            if e.code == 404 and not_found_ok:
+                logger.debug("HTTP 404 for %s — no such record", safe_url)
+                return None, url
             logger.error(
                 "HTTP %s %s for %s\n%s", e.code, e.reason, safe_url, redact(detail)
             )
@@ -306,16 +340,30 @@ def fetch_order(
     timeout=30.0,
     max_retries=5,
     backoff=2.0,
+    not_found_ok=False,
 ):
     """Fetch one order's full detail via GET /{CID}/orders.json/{order_number}.
 
     Returns the single order dict (unwrapped from the {status, error, body}
     envelope). Use this to check whether the per-order endpoint returns more
     fields than the list endpoint.
+
+    With not_found_ok, an Order Number the dispatch system has never issued
+    returns None instead of ending the program. The API is unambiguous about
+    it — HTTP 404, "No order found for order number N" — which is what makes
+    the gap filler able to tell an absent Order from a failed request.
     """
     query = urllib.parse.urlencode(_creds(key, customer_number, password))
     url = f"{BASE_URL}/{cid}/orders.json/{order_number}?{query}"
-    data, _ = request_json(url, timeout, max_retries=max_retries, backoff=backoff)
+    data, _ = request_json(
+        url,
+        timeout,
+        max_retries=max_retries,
+        backoff=backoff,
+        not_found_ok=not_found_ok,
+    )
+    if data is None:
+        return None
 
     if isinstance(data, dict) and data.get("error"):
         logger.error("API error (status %s): %s", data.get("status"), data["error"])
@@ -398,11 +446,15 @@ def save_order(order, out_dir):
 
 
 FetchResult = collections.namedtuple(
-    "FetchResult", "orders total saved skipped orders_stored stops_stored"
+    "FetchResult", "orders total saved skipped orders_stored stops_stored gap_left"
 )
 
 SweepResult = collections.namedtuple(
     "SweepResult", "considered requested orders_stored stops_stored"
+)
+
+FillResult = collections.namedtuple(
+    "FillResult", "considered requested found absent orders_stored stops_stored"
 )
 
 
@@ -432,6 +484,72 @@ def in_flight_order_numbers(conn, limit, source_key=ingest.DEFAULT_SOURCE):
             "where source_key = %s and not is_terminal "
             "order by order_number desc limit %s",
             (source_key, limit),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def missing_order_numbers(
+    conn, limit, source_key=ingest.DEFAULT_SOURCE, within_days=None
+):
+    """Return Order Numbers absent from the store, within its range, newest first.
+
+    The range is the stored one: from the lowest Order Number we hold to the
+    highest. Asking beyond it is a different question — the store has never
+    claimed to know what came before it began, and everything after it is
+    what an ordinary incremental run is for.
+
+    `within_days` narrows the bottom of that range to the Orders placed in
+    the last N days. Once the store has been swept clean once, the holes
+    worth looking for are recent ones — a routine fill has no reason to
+    re-ask about 2019 every hour. The window is expressed in time because
+    that is how the question is actually asked ("the last three months"),
+    and translated here into an Order Number floor: Order Numbers are issued
+    in order, so the lowest one placed inside the window is the bottom of
+    it. Pass None to sweep everything the store covers.
+
+    Two quite different things land in this list. Most are Order Numbers the
+    dispatch system never issued: the numbering has always had holes, and
+    they answer 404 for ever. The rest are Orders we failed to collect. The
+    query cannot tell them apart and does not try; only asking the API can,
+    which is what fill_gaps() does with the answer.
+
+    Newest first, so that a bounded run heals the most recent damage — the
+    Orders somebody is most likely to be looking for — before the oldest.
+    """
+    floor = None
+    if within_days is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select min(order_number) from orders "
+                "where source_key = %s "
+                "  and placed_at >= now() - make_interval(days => %s)",
+                (source_key, within_days),
+            )
+            floor = cur.fetchone()[0]
+        if floor is None:
+            # Nothing placed inside the window at all. That is a statement
+            # about the store, not about the window, so widen rather than
+            # quietly search nothing.
+            logger.warning(
+                "No Orders placed in the last %d day(s); looking for gaps "
+                "across the whole stored range instead.",
+                within_days,
+            )
+    with conn.cursor() as cur:
+        cur.execute(
+            "with bounds as ("
+            "  select greatest(min(order_number), coalesce(%s, min(order_number)))"
+            "         as lo,"
+            "         max(order_number) as hi"
+            "  from orders where source_key = %s"
+            ")"
+            "select n from bounds, generate_series(lo, hi) as n"
+            " where not exists ("
+            "   select 1 from orders o"
+            "   where o.source_key = %s and o.order_number = n"
+            " )"
+            " order by n desc limit %s",
+            (floor, source_key, source_key, limit),
         )
         return [row[0] for row in cur.fetchall()]
 
@@ -492,6 +610,11 @@ def get_all_orders(
     orders_stored = stops_stored = 0
     total = None
     page_num = 1
+    # Why pagination ended decides whether the Orders we just stored are
+    # contiguous with the ones already stored. "known" and "exhausted" mean
+    # they are; "ceiling" and "failed" mean we stopped in the middle and
+    # left a hole. The default is the one the `while` condition produces.
+    stop_reason = "ceiling"
 
     watermark = sql_watermark(conn, source_key) if (incremental and conn) else None
 
@@ -549,6 +672,7 @@ def get_all_orders(
                     e,
                     len(all_orders),
                 )
+                stop_reason = "failed"
                 break
 
             # The API wraps results in an envelope: {status, error, body:{...}}.
@@ -647,12 +771,15 @@ def get_all_orders(
                     page_num,
                     len(all_orders),
                 )
+                stop_reason = "known"
                 break
 
             # Stop when this page wasn't full, or we've reached the reported count.
             if not orders or len(orders) < effective_page_size:
+                stop_reason = "exhausted"
                 break
             if total is not None and len(all_orders) >= total:
+                stop_reason = "exhausted"
                 break
 
             time.sleep(page_delay)  # pause between page requests
@@ -668,7 +795,33 @@ def get_all_orders(
         saved,
         skipped,
     )
-    return FetchResult(all_orders, total, saved, skipped, orders_stored, stops_stored)
+
+    # An incremental run that stopped before reaching already-stored Orders
+    # has stored a block that does not touch the one below it. Nothing in
+    # the store records that, and the next run's watermark is the highest
+    # Order Number there is, so without this the hole is permanent and
+    # silent. Say exactly which Orders are in it; --fill-gaps collects them.
+    gap_left = None
+    if incremental and watermark is not None and stop_reason in ("ceiling", "failed"):
+        fetched = [n for n in (order_number_of(o) for o in all_orders) if n is not None]
+        if fetched and min(fetched) - 1 >= watermark + 1:
+            gap_left = (watermark + 1, min(fetched) - 1)
+            logger.error(
+                "Incomplete incremental run: stopped at the page %s having "
+                "fetched down to Order #%d, which does not meet the Order "
+                "#%d already stored. Orders #%d-#%d were never requested, "
+                "and no later incremental run will ask for them — the "
+                "watermark is now above them. Recover with --fill-gaps, or "
+                "a higher --max-pages.",
+                "ceiling" if stop_reason == "ceiling" else "failure point",
+                min(fetched),
+                watermark,
+                gap_left[0],
+                gap_left[1],
+            )
+    return FetchResult(
+        all_orders, total, saved, skipped, orders_stored, stops_stored, gap_left
+    )
 
 
 def sweep_in_flight(
@@ -761,6 +914,140 @@ def sweep_in_flight(
         "Sweep done: re-requested %d Order(s), updated %d.", requested, orders_stored
     )
     return SweepResult(len(numbers), requested, orders_stored, stops_stored)
+
+
+def fill_gaps(
+    conn,
+    cid,
+    key,
+    customer_number=None,
+    password=None,
+    timeout=30.0,
+    limit=500,
+    preview=False,
+    request_delay=1.0,
+    max_retries=5,
+    retry_backoff=2.0,
+    out_dir=None,
+    overwrite=False,
+    refresh_stale=False,
+    source_key=ingest.DEFAULT_SOURCE,
+    within_days=None,
+):
+    """Request the Orders the store is missing inside its own range.
+
+    Paging cannot reach these. An incremental run resumes from the highest
+    Order Number stored and stops at the first Order it already has, so a hole
+    below that watermark is invisible to it for ever, however many pages it is
+    allowed. The only way back to those Orders is to name them one at a time.
+
+    Each absent Order Number gets one request, and the reply settles which kind
+    of hole it is: an Order comes back and is stored, or the API answers 404
+    and the number is one the dispatch system never issued. Both outcomes are
+    counted, because the ratio is the interesting part — a run that is all 404s
+    has found nothing wrong, and a run that recovers Orders has found a fetch
+    that failed silently.
+
+    Nothing records the 404s, so every run re-asks about them. That is a
+    deliberate trade: there are a few dozen of them against a store of 170,000
+    Orders, which is cheaper than a table to remember them by, and it means a
+    number the dispatch system issues late is picked up rather than written off.
+    Watch the `absent` count over time; if it ever grows into the thousands,
+    the trade has stopped paying and they are worth persisting.
+
+    Bounded by `limit`, like the In Flight sweep and for the same reason: one
+    request each, against an API with a rate limit.
+    """
+    numbers = missing_order_numbers(conn, limit, source_key, within_days)
+    window = (
+        "the whole stored range"
+        if within_days is None
+        else f"the last {within_days} day(s)"
+    )
+    if not numbers:
+        logger.info("No gaps in the Order store across %s; nothing to fill.", window)
+        return FillResult(0, 0, 0, 0, 0, 0)
+
+    if preview:
+        logger.info(
+            "Would request %d absent Order Number(s): %s",
+            len(numbers),
+            ", ".join(f"#{n}" for n in numbers[:20])
+            + (" ..." if len(numbers) > 20 else ""),
+        )
+        return FillResult(len(numbers), 0, 0, 0, 0, 0)
+
+    logger.info(
+        "Filling %d gap(s) across %s, one request each (#%d down to #%d).",
+        len(numbers),
+        window,
+        numbers[0],
+        numbers[-1],
+    )
+    requested = found = absent = orders_stored = stops_stored = 0
+    bar = tqdm(total=len(numbers), unit="order", desc="Gaps")
+    try:
+        for number in numbers:
+            try:
+                order = fetch_order(
+                    cid,
+                    number,
+                    key,
+                    customer_number,
+                    password,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    backoff=retry_backoff,
+                    not_found_ok=True,
+                )
+            except APIRequestError as e:
+                logger.error(
+                    "Stopping the gap fill after repeated failures (%s). "
+                    "%d Order(s) recovered so far; rerun to continue.",
+                    e,
+                    orders_stored,
+                )
+                break
+            requested += 1
+            if not order:
+                # A number the dispatch system never issued. Not a problem,
+                # and not something to warn about once per run per number.
+                absent += 1
+                logger.debug(
+                    "Order #%s does not exist; the numbering skips it.", number
+                )
+                bar.update(1)
+                time.sleep(request_delay)
+                continue
+            found += 1
+            if out_dir is not None:
+                path = order_path(order, out_dir)
+                do_save, _reason = save_decision(
+                    path,
+                    os.path.exists(path),
+                    overwrite=overwrite,
+                    refresh_stale=refresh_stale,
+                )
+                if do_save:
+                    save_order(order, out_dir)
+            stored, stops = _store(conn, [order], source_key)
+            orders_stored += stored
+            stops_stored += stops
+            bar.update(1)
+            time.sleep(request_delay)
+    finally:
+        bar.close()
+
+    logger.info(
+        "Gap fill done: requested %d, recovered %d Order(s), "
+        "%d Order Number(s) do not exist.",
+        requested,
+        orders_stored,
+        absent,
+    )
+    return FillResult(
+        len(numbers), requested, found, absent, orders_stored, stops_stored
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +1250,7 @@ def order_flags(o):
     return "read" if o.get("read") else "open"
 
 
-def summarize(result, with_json=True, sweep=None):
+def summarize(result, with_json=True, sweep=None, fill=None):
     """Print what the run retrieved, stored and saved as three separate counts.
 
     They are deliberately different numbers. An incremental run re-reads its
@@ -989,6 +1276,11 @@ def summarize(result, with_json=True, sweep=None):
         print(
             f"Swept     {sweep.orders_stored:>7,}  in-flight Order(s) updated, "
             f"{sweep.requested:,} re-requested"
+        )
+    if fill is not None:
+        print(
+            f"Filled    {fill.orders_stored:>7,}  missing Order(s) recovered, "
+            f"{fill.absent:,} Order Number(s) never existed"
         )
 
     if not orders:
@@ -1142,6 +1434,43 @@ def main():
         "and request none of them.",
     )
     parser.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="Request the Orders missing from the store inside its own "
+        "range, one at a time. Paging cannot reach these: they sit below "
+        "the watermark an incremental run resumes from.",
+    )
+    parser.add_argument(
+        "--fill-days",
+        type=int,
+        default=90,
+        metavar="N",
+        help="How far back --fill-gaps looks, in days of Orders placed "
+        "(default 90). Once the store has been swept clean once, only "
+        "recent holes are worth re-checking.",
+    )
+    parser.add_argument(
+        "--fill-all",
+        action="store_true",
+        help="Ignore --fill-days and look for gaps across every Order the "
+        "store covers. This is the one-off sweep after a loss, not the "
+        "routine one.",
+    )
+    parser.add_argument(
+        "--fill-limit",
+        type=int,
+        default=500,
+        metavar="N",
+        help="Most Order Numbers one --fill-gaps run will request "
+        "(default 500). Newest first.",
+    )
+    parser.add_argument(
+        "--fill-preview",
+        action="store_true",
+        help="Report which Order Numbers --fill-gaps would request, and "
+        "request none of them.",
+    )
+    parser.add_argument(
         "--excel",
         default="output/orders.xlsx",
         metavar="PATH",
@@ -1216,6 +1545,7 @@ def main():
 
     out_dir = None if args.no_json else args.out_dir
     sweep = None
+    fill = None
     try:
         result = get_all_orders(
             cid=args.cid,
@@ -1254,13 +1584,35 @@ def main():
                 overwrite=args.overwrite,
                 refresh_stale=args.refresh_stale,
             )
+
+        # After the sweep, so that a run doing everything does it in the
+        # order the store benefits from: collect what is new, refresh what
+        # is still moving, then go back for what was never collected.
+        if args.fill_gaps or args.fill_preview:
+            fill = fill_gaps(
+                conn,
+                args.cid,
+                args.key,
+                args.customer_number,
+                args.password,
+                timeout=args.timeout,
+                limit=args.fill_limit,
+                preview=args.fill_preview,
+                request_delay=args.page_delay,
+                max_retries=args.max_retries,
+                retry_backoff=args.retry_backoff,
+                out_dir=out_dir,
+                overwrite=args.overwrite,
+                refresh_stale=args.refresh_stale,
+                within_days=None if args.fill_all else args.fill_days,
+            )
     finally:
         conn.close()
 
     if args.raw:
         print(json.dumps(orders, indent=2, ensure_ascii=False))
     else:
-        summarize(result, with_json=not args.no_json, sweep=sweep)
+        summarize(result, with_json=not args.no_json, sweep=sweep, fill=fill)
 
     logger.info(
         "Stored %d Order(s) and %d Route Stop(s) in the database",
@@ -1290,6 +1642,13 @@ def main():
             n_orders,
             n_stops,
         )
+
+    # A run that left a hole and did nothing about it did not succeed, and
+    # must not report that it did: the whole failure mode being fixed here
+    # is one that looked like success. --fill-gaps in the same run is the
+    # thing that does something about it, so it clears this.
+    if result.gap_left is not None and not (args.fill_gaps or args.fill_preview):
+        return 3
     return 0
 
 

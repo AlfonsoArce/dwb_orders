@@ -4,11 +4,15 @@ Nothing here reaches the network or consumes rate limit, and every assertion
 is about what ended up in the database.
 """
 
+import datetime as dt
 import os
+from zoneinfo import ZoneInfo
 
 import psycopg
 import pytest
 from conftest import make_order, one, rows
+
+from dwb.coerce import EASTERN
 
 
 @pytest.fixture
@@ -264,3 +268,164 @@ def test_the_sweep_writes_nothing_when_nothing_changed(fetch, dispatch, db):
 
     assert dispatch.order_requests == ["/TESTCO/orders.json/401791"]
     assert rows(db, "select order_number, updated_at from orders") == before
+
+
+# --- 10: holes below the watermark -----------------------------------------
+#
+# An incremental run resumes from the highest Order Number stored and stops at
+# the first Order it already has. That is only safe while the stored Orders
+# reach down to meet the ones below them. A run that stops early — the page
+# ceiling, or an API that stopped answering — stores a block that does not,
+# and every later run reads a watermark above the hole. These lock in that the
+# hole is reported when it is made, and reachable afterwards.
+
+def _api_time(days_ago):
+    """A placed-at the way the API writes it, relative to now.
+
+    Naive and Eastern, because that is what the API sends and what the store
+    assumes (ADR-0001) — a UTC wall clock here would put an Order on the wrong
+    side of the window for five hours of every day.
+    """
+    now = dt.datetime.now(ZoneInfo(EASTERN))
+    return (now - dt.timedelta(days=days_ago)).strftime("%a, %d %b %Y %H:%M:%S")
+
+
+def test_a_truncated_incremental_run_reports_the_hole_it_left(fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401801)])
+    fetch()
+
+    # Twenty more Orders arrive, and the next run is allowed one page of five.
+    dispatch.add(*[make_order(n) for n in range(401801, 401821)])
+    result = fetch("--incremental", "--page-size", "5", "--max-pages", "1",
+                   expect=3)
+
+    # It kept the newest five and never asked for 401801-401815, which now sit
+    # below a watermark of 401820. Exiting 0 here is the bug: the run looked
+    # like a success and had just made 15 Orders unreachable.
+    assert one(db, "select max(order_number) from orders") == (401820,)
+    assert one(db, "select count(*) from orders "
+                   "where order_number between 401801 and 401815") == (0,)
+    assert "401801" in result.stderr and "401815" in result.stderr
+
+
+def test_a_run_that_meets_the_stored_orders_reports_no_hole(fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401801)])
+    fetch()
+
+    dispatch.add(*[make_order(n) for n in range(401801, 401806)])
+    # Room enough to page down to what is already stored, so nothing is skipped.
+    fetch("--incremental", "--page-size", "5", "--max-pages", "10")
+
+    assert one(db, "select count(*) from orders") == (15,)
+
+
+def test_paging_can_never_recover_the_hole_on_its_own(fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401801)])
+    fetch()
+    dispatch.add(*[make_order(n) for n in range(401801, 401821)])
+    fetch("--incremental", "--page-size", "5", "--max-pages", "1", expect=3)
+
+    # Unlimited pages, and it still cannot help: the missing Orders are below
+    # the watermark, so the first page reaches known territory and stops. The
+    # overlap window is the only thing that ever looks below the watermark,
+    # and a hole wider than the overlap is beyond it.
+    fetch("--incremental", "--max-pages", "100", "--overlap-pages", "0")
+
+    assert one(db, "select count(*) from orders "
+                   "where order_number between 401801 and 401815") == (0,)
+
+
+def test_filling_the_gaps_collects_what_paging_cannot_reach(fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401801)])
+    fetch()
+    dispatch.add(*[make_order(n) for n in range(401801, 401821)])
+    fetch("--incremental", "--page-size", "5", "--max-pages", "1", expect=3)
+
+    fetch("--incremental", "--overlap-pages", "0", "--fill-gaps", "--fill-all")
+
+    assert one(db, "select count(*) from orders") == (30,)
+    assert rows(db, "select order_number from orders "
+                    "where order_number between 401801 and 401815 "
+                    "order by order_number") == [(n,) for n in range(401801, 401816)]
+
+
+def test_a_run_that_fills_its_own_gap_reports_success(fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401801)])
+    fetch()
+    dispatch.add(*[make_order(n) for n in range(401801, 401821)])
+
+    # Truncated, so it leaves a hole — and collects it in the same run, which
+    # is what the poller does. Nothing is left outstanding, so exit 0.
+    fetch("--incremental", "--page-size", "5", "--max-pages", "1",
+          "--fill-gaps", "--fill-all")
+
+    assert one(db, "select count(*) from orders") == (30,)
+
+
+def test_order_numbers_that_never_existed_are_not_an_error(fetch, dispatch, db):
+    # The numbering has always had holes. Asking about one answers 404, which
+    # is an answer, not a failure: the run carries on and exits 0.
+    dispatch.add(*[make_order(n) for n in range(401791, 401796)])
+    dispatch.add(*[make_order(n) for n in range(401801, 401806)])
+    fetch()
+
+    result = fetch("--incremental", "--overlap-pages", "0", "--fill-gaps",
+                   "--fill-all")
+
+    assert one(db, "select count(*) from orders") == (10,)
+    assert len(dispatch.order_requests) == 5      # 401796-401800, all absent
+    assert "5 Order Number(s) never existed" in result.stdout
+
+
+def test_the_fill_window_bounds_how_far_back_it_looks(fetch, dispatch, db):
+    old, recent = _api_time(400), _api_time(2)
+    dispatch.add(*[make_order(n, time=old)
+                   for n in list(range(401791, 401796)) + list(range(401801, 401806))])
+    dispatch.add(*[make_order(n, time=recent)
+                   for n in list(range(401811, 401816)) + list(range(401821, 401826))])
+    fetch()
+
+    fetch("--incremental", "--overlap-pages", "0", "--fill-gaps", "--fill-days", "30")
+
+    # Only the hole among Orders placed inside the window was asked about; the
+    # one among Orders placed over a year ago was left alone.
+    assert sorted(dispatch.order_requests) == [
+        f"/TESTCO/orders.json/{n}" for n in range(401816, 401821)]
+
+
+def test_the_whole_range_is_searched_when_the_window_is_waived(fetch, dispatch, db):
+    old, recent = _api_time(400), _api_time(2)
+    dispatch.add(*[make_order(n, time=old)
+                   for n in list(range(401791, 401796)) + list(range(401801, 401806))])
+    dispatch.add(*[make_order(n, time=recent)
+                   for n in list(range(401811, 401816)) + list(range(401821, 401826))])
+    fetch()
+
+    fetch("--incremental", "--overlap-pages", "0", "--fill-gaps", "--fill-all")
+
+    assert len(dispatch.order_requests) == 15     # 401796-401800, 401806-401810,
+                                                  # 401816-401820
+
+
+def test_the_fill_is_bounded(fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401796)])
+    dispatch.add(*[make_order(n) for n in range(401811, 401816)])
+    fetch()
+
+    fetch("--incremental", "--overlap-pages", "0", "--fill-gaps", "--fill-all",
+          "--fill-limit", "4")
+
+    assert len(dispatch.order_requests) == 4
+
+
+def test_the_fill_preview_names_the_gaps_and_requests_none_of_them(
+        fetch, dispatch, db):
+    dispatch.add(*[make_order(n) for n in range(401791, 401796)])
+    dispatch.add(*[make_order(n) for n in range(401801, 401806)])
+    fetch()
+
+    result = fetch("--incremental", "--overlap-pages", "0", "--fill-preview",
+                   "--fill-all", "--console-level", "INFO")
+
+    assert "#401800" in result.stderr
+    assert dispatch.order_requests == []
