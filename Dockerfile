@@ -1,9 +1,14 @@
-# The Orders viewer: one image serving one origin.
+# Two images from one build: the Orders viewer, and the Orders poller.
 #
-# A Node stage builds the frontend from its lockfile, and a Python stage
-# installs from uv.lock and serves both the API and the built assets. The
-# frontend's toolchain does not survive into the running image — only the few
-# files it produced.
+# A Node stage builds the frontend from its lockfile, a shared Python stage
+# installs from uv.lock, and the two service stages take what each of them
+# needs from it. The frontend's toolchain does not survive into either running
+# image — only the few files it produced — and the poller carries no frontend
+# at all.
+#
+# The two stages are separate because their rights differ. The viewer must not
+# be able to write anything; the poller must not be able to serve anything.
+# Sharing one image would have given each the other's surface for nothing.
 #
 # The build context is an allowlist; see .dockerignore, which exists so that
 # customer freight records in the working tree cannot reach a layer.
@@ -25,8 +30,11 @@ COPY frontend/ ./
 RUN npm run build
 
 
-# --- the service -----------------------------------------------------------
-FROM python:3.12-slim AS service
+# --- the dependency tree, installed once -----------------------------------
+# Both service stages start here, so the lockfile is resolved and installed in
+# a single layer that they share. Nothing application-specific belongs in this
+# stage: anything copied here is copied into both images.
+FROM python:3.12-slim AS deps
 
 # uv resolves nothing here: it installs exactly what uv.lock already pins.
 COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /usr/local/bin/uv
@@ -43,6 +51,11 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY dwb/ ./dwb/
+
+
+# --- the viewer ------------------------------------------------------------
+FROM deps AS service
+
 COPY viewer.py ./
 COPY --from=frontend /build/dist ./frontend/dist
 
@@ -55,3 +68,25 @@ USER viewer
 # on 127.0.0.1 only, so nothing about this is reachable from the network.
 EXPOSE 8000
 CMD ["python", "viewer.py", "--host", "0.0.0.0", "--port", "8000"]
+
+
+# --- the poller ------------------------------------------------------------
+# Runs the incremental fetch on a loop, so the Order store keeps up with
+# dispatch without anyone running a command. See poll.sh for the loop, and
+# docker-compose.yml for how it is configured.
+FROM deps AS poller
+
+COPY get_orders.py poll.sh ./
+
+# The poller writes to the database and to its own stdout, and to nothing
+# else: poll.sh passes --no-json --no-excel, so no output directory is opened
+# and no volume is needed. That is deliberate — this repository lives in
+# iCloud Drive, and a process writing customer records into a synced folder
+# every few minutes is a sync daemon's problem, not a durable archive.
+RUN useradd --create-home --uid 10002 poller
+USER poller
+
+# No EXPOSE and no healthcheck: it listens on nothing, and "healthy" for a
+# periodic job means its last run succeeded, which `docker compose logs` and
+# the Order store's own contents answer better than a probe could.
+CMD ["sh", "poll.sh"]

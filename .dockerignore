@@ -9,10 +9,14 @@
 # admits it.
 *
 
-# The service itself.
+# The viewer.
 !dwb
 !dwb/**
 !viewer.py
+
+# The poller: the fetch script, and the loop that runs it.
+!get_orders.py
+!poll.sh
 
 # Its Python dependencies, installed from the lockfile.
 !pyproject.toml

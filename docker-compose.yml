@@ -1,4 +1,5 @@
-# Postgres for the Order store, a browser client, and the Orders viewer.
+# Postgres for the Order store, a browser client, the Orders viewer, and the
+# poller that keeps the store up to date.
 #
 # Adminer and the viewer bind to 127.0.0.1 only. Postgres is published on all
 # interfaces (DWB_PG_BIND, default 0.0.0.0) so other machines can reach the
@@ -28,6 +29,10 @@
 #                         0.0.0.0 — every interface; use 127.0.0.1 for local)
 #   DWB_ADMINER_PORT      host port for Adminer     (default 8081)
 #   DWB_VIEWER_PORT       host port for the viewer  (default 8082)
+#   DWB_POLL_INTERVAL     seconds between fetches   (default 300)
+#   DWB_POLL_MAX_PAGES    the poller's catch-up ceiling (default 200)
+#   DWB_POLL_FILL_EVERY   fill gaps every Nth run, 0 to never (default 12)
+#   DWB_POLL_FILL_DAYS    how far back the gap fill looks (default 90)
 
 services:
   db:
@@ -69,6 +74,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: service
     image: dwb-orders-viewer
     container_name: dwb-orders-viewer
     restart: unless-stopped
@@ -95,6 +101,64 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # The poller keeps the Order store current: an incremental fetch every
+  # DWB_POLL_INTERVAL seconds, for as long as the stack is up. It replaces
+  # running `uv run get_orders.py --incremental` by hand, and it lives here
+  # rather than in a host cron or LaunchAgent for two reasons: a LaunchAgent
+  # only runs while somebody is logged in, and anything running from the
+  # working tree writes its output into iCloud Drive. This writes to the
+  # database and to its logs, and to nothing else — no volume, no bind mount,
+  # no contact with the synced folder.
+  poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: poller
+    image: dwb-orders-poller
+    container_name: dwb-orders-poller
+    restart: unless-stopped
+    environment:
+      # The service name and the *internal* port, for the same reason the
+      # viewer's connection string is its own setting: 127.0.0.1:5434 is the
+      # published address on the host and means nothing in here.
+      DWB_DSN: postgresql://dwb@db:5432/dwb_orders
+      # The poller writes Orders, so it connects as the owning role — unlike
+      # the viewer, which must not, and has its own account and its own secret.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Dispatch API credentials. .env never enters an image (see
+      # .dockerignore); compose reads it on the host and passes these in.
+      DWB_CID: ${DWB_CID:?set DWB_CID in .env}
+      DWB_KEY: ${DWB_KEY:?set DWB_KEY in .env}
+      DWB_POLL_INTERVAL: ${DWB_POLL_INTERVAL:-300}
+      # A ceiling, not a target: --incremental stops at the first Order it
+      # already has, so this only does work after the poller has been down.
+      # It must never be 1 — see the header comment in poll.sh.
+      DWB_POLL_MAX_PAGES: ${DWB_POLL_MAX_PAGES:-200}
+      DWB_POLL_OVERLAP_PAGES: ${DWB_POLL_OVERLAP_PAGES:-5}
+      # Paging cannot recover an Order it skipped: the hole sits below
+      # the watermark it resumes from. So once an hour (12 runs at 300s)
+      # the poller asks the store which Order Numbers are missing and
+      # requests them by name. The window is in days because that is how
+      # the question gets asked — "the last three months" — and 90 days
+      # of recent Orders is a few hundred requests at worst, most of
+      # which come back 404 for numbers dispatch never issued.
+      DWB_POLL_FILL_EVERY: ${DWB_POLL_FILL_EVERY:-12}
+      DWB_POLL_FILL_DAYS: ${DWB_POLL_FILL_DAYS:-90}
+      DWB_POLL_FILL_LIMIT: ${DWB_POLL_FILL_LIMIT:-500}
+      # tqdm draws a progress bar for a terminal that is not there; without
+      # this, every run leaves a few hundred redraws in the container log.
+      TQDM_DISABLE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    # A process that logs every five minutes for months will fill a disk if
+    # nothing bounds it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   pgdata:
